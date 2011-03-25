@@ -191,6 +191,16 @@ public class VectorClock implements Version, Serializable {
         return copyClock;
     }
 
+    public VectorClock decrementedAll() {
+        List<ClockEntry> entries = getEntries();
+        int size = entries.size();
+        List<ClockEntry> decrementedEntries = new ArrayList<ClockEntry>(size);
+        for(ClockEntry entry: entries) {
+            decrementedEntries.add(entry.decremented());
+        }
+        return new VectorClock(decrementedEntries, this.timestamp);
+    }
+
     @Override
     public VectorClock clone() {
         return new VectorClock(Lists.newArrayList(versions), this.timestamp);

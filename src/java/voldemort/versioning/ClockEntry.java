@@ -73,6 +73,10 @@ public final class ClockEntry implements Cloneable, Serializable {
         return new ClockEntry(nodeId, version + 1);
     }
 
+    public ClockEntry decremented() {
+        return new ClockEntry(nodeId, Math.max(1, version - 1));
+    }
+
     @Override
     public int hashCode() {
         return nodeId + (((int) version) << 16);
