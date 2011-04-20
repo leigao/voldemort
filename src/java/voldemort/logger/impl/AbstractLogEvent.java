@@ -9,12 +9,12 @@ import voldemort.versioning.Versioned;
 
 public class AbstractLogEvent implements VoldemortLogEvent {
 
-    private final Version _version;
+    private final VectorClock _version;
     private final ByteArray _key;
     private final Versioned<byte[]> _value;
     private VoldemortEventType _type;
 
-    public AbstractLogEvent(ByteArray key, Version version, Versioned<byte[]> value) {
+    public AbstractLogEvent(ByteArray key, VectorClock version, Versioned<byte[]> value) {
         _key = key;
         _version = version;
         _value = value;
@@ -48,5 +48,14 @@ public class AbstractLogEvent implements VoldemortLogEvent {
             return (_key.equals(event.getKey()) && _value.equals(event.getValue())
                     && _type.equals(event.getType()) && ((VectorClock) _version).equals(event.getVersion()));
         }
+    }
+
+    @Override
+    public String toString() {
+        StringBuilder st = new StringBuilder();
+        st.append("key=" + new String(_key.get()) + " ");
+        st.append("version=" + _version + " ");
+        st.append("value=" + _value + " ");
+        return st.toString();
     }
 }

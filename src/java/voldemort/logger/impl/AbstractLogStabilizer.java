@@ -28,6 +28,7 @@ public class AbstractLogStabilizer implements LogStabilizer {
         trackedUnit.appendUnstableEvent(event);
         List<VoldemortLogEvent> stablePrefix = trackedUnit.getStableLog();
         _stableEventPublisher.publish(stablePrefix);
+        stablePrefix.clear();
     }
 
     public void registerStableEventsPublisher(StableEventPublisher publisher) {
