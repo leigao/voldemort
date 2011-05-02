@@ -42,5 +42,4 @@ public class AbstractLogStabilizer implements LogStabilizer {
     public void registerStableEventsPublisher(VoldemortLogEventPublisher publisher) {
         _eventPublisher = publisher;
     }
-
 }

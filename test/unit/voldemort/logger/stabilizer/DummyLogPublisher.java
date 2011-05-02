@@ -2,12 +2,12 @@ package voldemort.logger.stabilizer;
 
 import java.util.List;
 
-import voldemort.logger.pub.StableEventPublisher;
 import voldemort.logger.pub.VoldemortLogEvent;
+import voldemort.logger.pub.VoldemortLogEventPublisher;
 import voldemort.versioning.Occured;
 import voldemort.versioning.VectorClock;
 
-public class DummyLogPublisher implements StableEventPublisher {
+public class DummyLogPublisher implements VoldemortLogEventPublisher {
 
     private final List<VoldemortLogEvent> _eventLog;
     private StringBuilder _errMsg;

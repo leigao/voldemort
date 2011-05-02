@@ -78,12 +78,9 @@ public class StabilizerUnit {
                 finished = true;
             }
         }
-
-        // reset the timer if some
     }
 
     private void appendTentative(VoldemortLogEvent event) throws ObsoleteVersionException {
-
         VectorClock incomingVersion = (VectorClock) event.getVersion();
         Occured occured = getOccuredPosition(incomingVersion);
 
