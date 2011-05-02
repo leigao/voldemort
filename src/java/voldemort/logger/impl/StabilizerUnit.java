@@ -24,14 +24,21 @@ public class StabilizerUnit {
     private VectorClock _maxStableVersion;
     private VectorClock _maxTentativeVersion;
     private VectorClock _mergedConcurrentVersion;
+    private final int _uid;
+    private final long _idleTimeout;
 
-    public StabilizerUnit() {
+    // TODO: figure out when to update the timer
+    private long _idleTimer;
+
+    public StabilizerUnit(int uid, long idleTimeout) {
         _maxStableVersion = new VectorClock();
         _maxTentativeVersion = new VectorClock();
         _stableEventQueue = new ArrayList<VoldemortLogEvent>();
         _tentativeEventQueue = new ArrayDeque<VoldemortLogEvent>();
         _conflictVersionSet = new HashSet<VectorClock>();
         _mergedConcurrentVersion = null;
+        _uid = uid;
+        _idleTimeout = idleTimeout;
     }
 
     public void appendUnstableEvent(VoldemortLogEvent event) throws ObsoleteVersionException {
@@ -51,6 +58,8 @@ public class StabilizerUnit {
 
     private void processStable() {
         boolean finished = false;
+        boolean newStableEvents = false;
+
         _maxStableVersion = _maxStableVersion.merge(_maxTentativeVersion.decrementedAll());
         Version version = _tentativeEventQueue.peek().getVersion();
         while(null != version && !finished) {
@@ -60,11 +69,17 @@ public class StabilizerUnit {
                 // stable version is greater than or equal to the current events
                 _stableEventQueue.add(_tentativeEventQueue.poll());
                 version = _tentativeEventQueue.peek().getVersion();
+
+                if(!newStableEvents) {
+                    newStableEvents = true;
+                }
             } else {
                 // events after this will all have larger version, we stop here.
                 finished = true;
             }
         }
+
+        // reset the timer if some
     }
 
     private void appendTentative(VoldemortLogEvent event) throws ObsoleteVersionException {
@@ -181,5 +196,13 @@ public class StabilizerUnit {
                 finished = true;
             }
         }
+    }
+
+    public int getId() {
+        return _uid;
+    }
+
+    public long getIdleTimer() {
+        return _idleTimer;
     }
 }

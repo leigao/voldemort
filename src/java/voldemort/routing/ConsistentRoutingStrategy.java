@@ -135,6 +135,10 @@ public class ConsistentRoutingStrategy implements RoutingStrategy {
         return replicationPartitionsList;
     }
 
+    public Integer getPrimaryPartiion(byte[] key) {
+        return Integer.valueOf(abs(hash.hash(key)) % (Math.max(1, this.partitionToNode.length)));
+    }
+
     public Set<Node> getNodes() {
         Set<Node> s = Sets.newHashSetWithExpectedSize(partitionToNode.length);
         for(Node n: this.partitionToNode)
@@ -155,7 +159,7 @@ public class ConsistentRoutingStrategy implements RoutingStrategy {
     }
 
     public List<Integer> getPartitionList(byte[] key) {
-        int index = abs(hash.hash(key)) % (Math.max(1, this.partitionToNode.length));
+        int index = getPrimaryPartiion(key);
         return getReplicatingPartitionList(index);
     }
 
