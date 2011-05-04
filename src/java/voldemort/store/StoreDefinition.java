@@ -60,6 +60,8 @@ public class StoreDefinition implements Serializable {
     private final HintedHandoffStrategyType hintedHandoffStrategyType;
     private final Integer hintPrefListSize;
     private final List<String> owners;
+    private final boolean versionedPartition;
+    private final boolean logStream;
 
     public StoreDefinition(String name,
                            String type,
@@ -84,7 +86,9 @@ public class StoreDefinition implements Serializable {
                            String factory,
                            HintedHandoffStrategyType hintedHandoffStrategyType,
                            Integer hintPrefListSize,
-                           List<String> owners) {
+                           List<String> owners,
+                           boolean versionedPartition,
+                           boolean logStream) {
         this.name = Utils.notNull(name);
         this.type = Utils.notNull(type);
         this.description = description;
@@ -109,6 +113,8 @@ public class StoreDefinition implements Serializable {
         this.hintedHandoffStrategyType = hintedHandoffStrategyType;
         this.hintPrefListSize = hintPrefListSize;
         this.owners = owners;
+        this.versionedPartition = versionedPartition;
+        this.logStream = logStream;
         checkParameterLegality();
     }
 
@@ -329,6 +335,14 @@ public class StoreDefinition implements Serializable {
         return this.owners;
     }
 
+    public boolean isVersionedPartition() {
+        return this.versionedPartition;
+    }
+
+    public boolean isLogStream() {
+        return this.logStream;
+    }
+
     @Override
     public boolean equals(Object o) {
         if(this == o)
@@ -371,7 +385,9 @@ public class StoreDefinition implements Serializable {
                                 def.getSerializerFactory() != null ? def.getSerializerFactory()
                                                                   : null)
                && Objects.equal(getHintedHandoffStrategyType(), def.getHintedHandoffStrategyType())
-               && Objects.equal(getHintPrefListSize(), def.getHintPrefListSize());
+               && Objects.equal(getHintPrefListSize(), def.getHintPrefListSize())
+               && isVersionedPartition() == def.isVersionedPartition()
+               && isLogStream() == def.isLogStream();
     }
 
     @Override
@@ -402,7 +418,9 @@ public class StoreDefinition implements Serializable {
                                 hasHintedHandoffStrategyType() ? getHintedHandoffStrategyType()
                                                               : null,
                                 hasHintPreflistSize() ? getHintPrefListSize() : null,
-                                getOwners());
+                                getOwners(),
+                                isVersionedPartition(),
+                                isLogStream());
     }
 
     @Override
@@ -421,6 +439,7 @@ public class StoreDefinition implements Serializable {
                + getZoneCountWrites() + ", serializer factory = " + getSerializerFactory() + ")"
                + ", hinted-handoff-strategy = " + getHintedHandoffStrategyType()
                + ", hint-preflist-size = " + getHintPrefListSize() + ", owners = " + getOwners()
-               + ")";
+               + ", enable-partition-version=" + isVersionedPartition() + ", enable-log-stream="
+               + isLogStream() + ")";
     }
 }

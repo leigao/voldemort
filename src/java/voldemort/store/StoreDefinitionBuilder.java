@@ -40,6 +40,8 @@ public class StoreDefinitionBuilder {
     private HintedHandoffStrategyType hintedHandoffStrategy = null;
     private Integer hintPrefListSize = null;
     private List<String> owners = null;
+    private boolean versionedPartition = false;
+    private boolean logStream = false;
 
     public String getName() {
         return Utils.notNull(name);
@@ -273,6 +275,24 @@ public class StoreDefinitionBuilder {
         return this;
     }
 
+    public boolean isLogStream() {
+        return logStream;
+    }
+
+    public StoreDefinitionBuilder setLogStream(boolean logStream) {
+        this.logStream = logStream;
+        return this;
+    }
+
+    public boolean isVersionedPartition() {
+        return versionedPartition;
+    }
+
+    public StoreDefinitionBuilder setVersionedPartition(boolean versionedPartition) {
+        this.versionedPartition = versionedPartition;
+        return this;
+    }
+
     public StoreDefinition build() {
         return new StoreDefinition(this.getName(),
                                    this.getType(),
@@ -297,6 +317,8 @@ public class StoreDefinitionBuilder {
                                    this.getSerializerFactory(),
                                    this.getHintedHandoffStrategy(),
                                    this.getHintPrefListSize(),
-                                   this.getOwners());
+                                   this.getOwners(),
+                                   this.isVersionedPartition(),
+                                   this.isLogStream());
     }
 }

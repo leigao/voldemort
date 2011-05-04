@@ -22,7 +22,9 @@
 			<xs:element name="persistence" type="xs:token" />
 			<xs:element name="description" type="xs:token" minOccurs="0" maxOccurs="1" />
 			<xs:element name="owners" type="xs:token" minOccurs="0" maxOccurs="1" />
-			<xs:element name="routing" type="xs:token" />
+			<xs:element name="versioned-partition" type="xs:token" minOccurs="0" maxOccurs="1" />
+                        <xs:element name="log-stream" type="xs:token" minOccurs="0" maxOccurs="1" />
+                        <xs:element name="routing" type="xs:token" />
 			<xs:element name="routing-strategy" type="xs:token"
 				minOccurs="0" maxOccurs="1" />
 			<xs:element name="replication-factor" type="xs:positiveInteger" />

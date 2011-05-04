@@ -66,6 +66,8 @@ public class StoreDefinitionsMapper {
     public final static String STORE_ELMT = "store";
     public final static String STORE_DESCRIPTION_ELMT = "description";
     public final static String STORE_OWNERS_ELMT = "owners";
+    public final static String STORE_VERSIONED_PARTITION_ELMT = "versioned-partition";
+    public final static String STORE_LOG_STREAM_ELMT = "log-stream";
     public final static String STORE_NAME_ELMT = "name";
     public final static String STORE_PERSISTENCE_ELMT = "persistence";
     public final static String STORE_KEY_SERIALIZER_ELMT = "key-serializer";
@@ -96,7 +98,6 @@ public class StoreDefinitionsMapper {
     public final static String VIEW_TRANS_ELMT = "view-class";
     public final static String VIEW_SERIALIZER_FACTORY_ELMT = "view-serializer-factory";
     private final static String STORE_VERSION_ATTR = "version";
-
     private final Schema schema;
 
     public StoreDefinitionsMapper() {
@@ -171,6 +172,9 @@ public class StoreDefinitionsMapper {
         String storeType = store.getChildText(STORE_PERSISTENCE_ELMT);
         String description = store.getChildText(STORE_DESCRIPTION_ELMT);
         String ownerText = store.getChildText(STORE_OWNERS_ELMT);
+        boolean versionedPartition = Boolean.parseBoolean(store.getChildText(STORE_VERSIONED_PARTITION_ELMT));
+        boolean logStream = Boolean.parseBoolean(store.getChildText(STORE_LOG_STREAM_ELMT));
+
         List<String> owners = Lists.newArrayList();
         if(ownerText != null) {
             for(String owner: Utils.COMMA_SEP.split(ownerText.trim()))
@@ -268,6 +272,8 @@ public class StoreDefinitionsMapper {
                                            .setZoneCountWrites(zoneCountWrites)
                                            .setHintedHandoffStrategy(hintedHandoffStrategy)
                                            .setHintPrefListSize(hintPrefListSize)
+                                           .setVersionedPartition(versionedPartition)
+                                           .setLogStream(logStream)
                                            .build();
     }
 
