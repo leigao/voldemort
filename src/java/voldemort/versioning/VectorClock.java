@@ -353,4 +353,20 @@ public class VectorClock implements Version, Serializable {
         return this.versions;
     }
 
+    public VectorClock mergeAllEntries(long mergeVersion) {
+        VectorClock newClock = new VectorClock(timestamp);
+        for(ClockEntry entry: versions) {
+            newClock.versions.add(new ClockEntry(entry.getNodeId(), Math.max(entry.getVersion(),
+                                                                             mergeVersion)));
+        }
+        return newClock;
+    }
+
+    public VectorClock setAllEntries(long newVersion) {
+        VectorClock newClock = new VectorClock(timestamp);
+        for(ClockEntry entry: versions) {
+            newClock.versions.add(new ClockEntry(entry.getNodeId(), newVersion));
+        }
+        return newClock;
+    }
 }

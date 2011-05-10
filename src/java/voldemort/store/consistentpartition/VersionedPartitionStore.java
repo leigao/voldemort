@@ -1,6 +1,8 @@
 package voldemort.store.consistentpartition;
 
+import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.Map.Entry;
@@ -10,10 +12,14 @@ import org.apache.log4j.Logger;
 
 import voldemort.VoldemortException;
 import voldemort.routing.RoutingStrategy;
+import voldemort.serialization.StringSerializer;
 import voldemort.store.DelegatingStore;
 import voldemort.store.Store;
+import voldemort.store.StoreDefinition;
 import voldemort.store.StoreUtils;
+import voldemort.store.metadata.MetadataStore;
 import voldemort.utils.ByteArray;
+import voldemort.versioning.ClockEntry;
 import voldemort.versioning.ObsoleteVersionException;
 import voldemort.versioning.Occured;
 import voldemort.versioning.VectorClock;
@@ -27,29 +33,72 @@ public class VersionedPartitionStore extends DelegatingStore<ByteArray, byte[], 
 
     private final Store<ByteArray, byte[], byte[]> _partitionVersionStore;
     private final RoutingStrategy _routingStrategy;
+    private final MetadataStore _metadata;
+    private final StoreDefinition _storeDef;
 
     public VersionedPartitionStore(Store<ByteArray, byte[], byte[]> innerStore,
-                                          Store<ByteArray, byte[], byte[]> partitionVersionStore,
-                                          RoutingStrategy routingStrategy) {
+                                   Store<ByteArray, byte[], byte[]> partitionVersionStore,
+                                   MetadataStore metadata,
+                                   StoreDefinition storeDef) {
         super(innerStore);
         _partitionVersionStore = partitionVersionStore;
-        _routingStrategy = routingStrategy;
+        _routingStrategy = metadata.getRoutingStrategy(storeDef.getName());
+        _metadata = metadata;
+        _storeDef = storeDef;
+
+        logger.info("VersionedPartitionStore:" + " innerStore=" + getInnerStore()
+                    + " partitionVersionStore=" + _partitionVersionStore + " metadata=" + _metadata
+                    + " storeDef=" + _storeDef);
+
     }
 
     // TODO: make sure partition version has only one value at any time.
+    // TODO: once partition version has its own store, make the keys more
+    // compact.
     private ByteArray getPartitionKey(ByteArray entryKey) {
         Integer partitionId = _routingStrategy.getPartitionList(entryKey.get()).get(0);
-        return new ByteArray(partitionId.byteValue());
+        String key = _storeDef.getName() + "_P" + partitionId;
+        logger.info("leigao4 Partition key=" + key + " used for key=" + new String(entryKey.get()));
+        return new ByteArray(key.getBytes());
     }
 
-    // TODO: make sure partition version has only one value at any time.
-    private Version loadPartitionVersion(ByteArray partitionKey) {
-        return _partitionVersionStore.getVersions(partitionKey).get(0);
+    private VectorClock loadPartitionVersion(ByteArray partitionKey) {
+        long maxVersion = 0;
+        long timestamp = 0;
+        StringSerializer serializer = new StringSerializer();
+        List<Versioned<byte[]>> versionedList = _partitionVersionStore.get(partitionKey, null);
+        for(Iterator<Versioned<byte[]>> it = versionedList.iterator(); it.hasNext();) {
+            String stringVersion = serializer.toObject(it.next().getValue());
+            VectorClock tmpVersion = new VectorClock(stringVersion.getBytes());
+            logger.info("leigao: " + tmpVersion);
+            long localMax = tmpVersion.getMaxVersion();
+            if(localMax > maxVersion) {
+                maxVersion = localMax;
+                timestamp = tmpVersion.getTimestamp();
+            }
+        }
+
+        logger.info("leigao3: " + maxVersion);
+
+        if(0 < maxVersion) {
+            // this is a hack: Short.MAX_VALUE is where the partition version is
+            // stored for now
+            ClockEntry entry = new ClockEntry(Short.MAX_VALUE, maxVersion);
+            List<ClockEntry> entryList = new ArrayList<ClockEntry>(1);
+            entryList.add(entry);
+            return new VectorClock(entryList, timestamp);
+        } else {
+            return null;
+        }
     }
 
-    private VectorClock mergeWithPartitionVersion(ByteArray key,
-                                                  VectorClock version,
-                                                  Map<ByteArray, Version> partitionVersionCache) {
+    // TODO: when loadPartitionVersion returns null, we don't put null in cache.
+    // As a result,
+    // subsequent get can't benefit from the cache. Change the cache to use a
+    // map that distinguish
+    // null value vs. non-existing-entry
+    private Version getPartitionVersionWithCache(ByteArray key,
+                                                 Map<ByteArray, Version> partitionVersionCache) {
         ByteArray partitionKey = getPartitionKey(key);
         Version partitionVersion = null;
 
@@ -62,13 +111,35 @@ public class VersionedPartitionStore extends DelegatingStore<ByteArray, byte[], 
         if(null == partitionVersion) {
             partitionVersion = loadPartitionVersion(partitionKey);
 
-            // put verion in cache if cache is in use
+            // put version in cache if cache is in use
             if(null != partitionVersionCache) {
                 partitionVersionCache.put(partitionKey, partitionVersion);
             }
         }
 
-        return version.merge((VectorClock) partitionVersion);
+        return partitionVersion;
+    }
+
+    private void mergeVersionWithPartitionVersion(ByteArray key,
+                                                  List<Version> versionList,
+                                                  Map<ByteArray, Version> partitionVersionCache) {
+
+        Version partitionVersion = getPartitionVersionWithCache(key, partitionVersionCache);
+        if(null != partitionVersion) {
+            logger.info("leigao7: " + partitionVersion);
+            versionList.add(partitionVersion);
+        }
+    }
+
+    private void mergeValueWithPartitionVersion(ByteArray key,
+                                                List<Versioned<byte[]>> versionedList,
+                                                Map<ByteArray, Version> partitionVersionCache) {
+
+        Version partitionVersion = getPartitionVersionWithCache(key, partitionVersionCache);
+        if(null != partitionVersion) {
+            Versioned<byte[]> versioned = new Versioned<byte[]>(new byte[1], partitionVersion);
+            versionedList.add(versioned);
+        }
     }
 
     @Override
@@ -77,10 +148,14 @@ public class VersionedPartitionStore extends DelegatingStore<ByteArray, byte[], 
         boolean deleted = false;
 
         ByteArray partitionKey = getPartitionKey(key);
-        Version partitionVersion = loadPartitionVersion(partitionKey);
+        VectorClock partitionVersion = loadPartitionVersion(partitionKey);
+        if(null != partitionVersion) {
+            partitionVersion = ((VectorClock) version).clone()
+                                                      .setAllEntries(partitionVersion.getMaxVersion());
+        }
 
         // if partitionVersion is 'before' the version of delete, go through
-        if(Occured.BEFORE == partitionVersion.compare(version)) {
+        if(null == partitionVersion || Occured.BEFORE == partitionVersion.compare(version)) {
             deleted = getInnerStore().delete(key, version);
         }
 
@@ -96,15 +171,8 @@ public class VersionedPartitionStore extends DelegatingStore<ByteArray, byte[], 
         Map<ByteArray, List<Versioned<byte[]>>> values = getInnerStore().getAll(keys, transforms);
 
         for(Entry<ByteArray, List<Versioned<byte[]>>> entry: values.entrySet()) {
-            // TODO: figure out how to deal with enties w/ multiple conflicting
-            // versions; for now we only work with the first one (which is
-            // incorrect).
             List<Versioned<byte[]>> versionList = entry.getValue();
-            Versioned<byte[]> versioned = versionList.get(0);
-            Version mergedVersion = mergeWithPartitionVersion(entry.getKey(),
-                                                              (VectorClock) versioned.getVersion(),
-                                                              partitionVersionCache);
-            versionList.set(0, new Versioned<byte[]>(versioned.getValue(), mergedVersion));
+            mergeValueWithPartitionVersion(entry.getKey(), versionList, partitionVersionCache);
         }
 
         return values;
@@ -116,10 +184,16 @@ public class VersionedPartitionStore extends DelegatingStore<ByteArray, byte[], 
         StoreUtils.assertValidKey(key);
 
         ByteArray partitionKey = getPartitionKey(key);
-        Version partitionVersion = loadPartitionVersion(partitionKey);
-
+        VectorClock partitionVersion = loadPartitionVersion(partitionKey);
+        if(null != partitionVersion) {
+            partitionVersion = ((VectorClock) value.getVersion()).clone()
+                                                                 .setAllEntries(partitionVersion.getMaxVersion());
+        }
+        logger.info("leigao: partitionVersion=" + partitionVersion);
+        logger.info("leigao: putVersion=" + value.getVersion());
         // if value is 'before' partition version, throw exception
-        if(Occured.BEFORE == value.getVersion().compare(partitionVersion)) {
+        if(null != partitionVersion
+           && Occured.BEFORE == value.getVersion().compare(partitionVersion)) {
             throw new ObsoleteVersionException("Key "
                                                + new String(hexCodec.encode(key.get()))
                                                + " "
@@ -136,15 +210,17 @@ public class VersionedPartitionStore extends DelegatingStore<ByteArray, byte[], 
     public List<Versioned<byte[]>> get(ByteArray key, byte[] transforms) throws VoldemortException {
         StoreUtils.assertValidKey(key);
 
-        // TODO: figure out how to deal with enties w/ multiple conflicting
-        // versions; for now we only work with the first one (which is
-        // incorrect).
         List<Versioned<byte[]>> versionedList = getInnerStore().get(key, transforms);
-        Versioned<byte[]> versioned = versionedList.get(0);
-        Version mergedVersion = mergeWithPartitionVersion(key,
-                                                          (VectorClock) versioned.getVersion(),
-                                                          null);
-        versionedList.set(0, new Versioned<byte[]>(versioned.getValue(), mergedVersion));
+        mergeValueWithPartitionVersion(key, versionedList, null);
         return versionedList;
+    }
+
+    @Override
+    public List<Version> getVersions(ByteArray key) {
+        StoreUtils.assertValidKey(key);
+
+        List<Version> versionList = getInnerStore().getVersions(key);
+        mergeVersionWithPartitionVersion(key, versionList, null);
+        return versionList;
     }
 }

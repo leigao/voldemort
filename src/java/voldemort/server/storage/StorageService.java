@@ -64,6 +64,7 @@ import voldemort.store.StorageConfiguration;
 import voldemort.store.StorageEngine;
 import voldemort.store.Store;
 import voldemort.store.StoreDefinition;
+import voldemort.store.consistentpartition.VersionedPartitionStore;
 import voldemort.store.grandfather.GrandfatheringStore;
 import voldemort.store.invalidmetadata.InvalidMetadataCheckingStore;
 import voldemort.store.logging.LoggingStore;
@@ -285,6 +286,7 @@ public class StorageService extends AbstractService {
         if(storeDef.getType().compareTo(ReadOnlyStorageConfiguration.TYPE_NAME) == 0) {
             final RoutingStrategy routingStrategy = new RoutingStrategyFactory().updateRoutingStrategy(storeDef,
                                                                                                        metadata.getCluster());
+
             ((ReadOnlyStorageConfiguration) config).setRoutingStrategy(routingStrategy);
         }
 
@@ -301,7 +303,7 @@ public class StorageService extends AbstractService {
 
         // openStore() should have atomic semantics
         try {
-            registerEngine(engine);
+            registerEngine(engine, storeDef);
 
             if(voldemortConfig.isServerRoutingEnabled())
                 registerNodeStores(storeDef, metadata.getCluster(), voldemortConfig.getNodeId());
@@ -356,12 +358,17 @@ public class StorageService extends AbstractService {
         engine.close();
     }
 
+    public void registerEngine(StorageEngine<ByteArray, byte[], byte[]> engine) {
+        registerEngine(engine, null);
+    }
+
     /**
      * Register the given engine with the storage repository
      * 
      * @param engine Register the storage engine
      */
-    public void registerEngine(StorageEngine<ByteArray, byte[], byte[]> engine) {
+    public void registerEngine(StorageEngine<ByteArray, byte[], byte[]> engine,
+                               StoreDefinition storeDef) {
         Cluster cluster = this.metadata.getCluster();
         storeRepository.addStorageEngine(engine);
 
@@ -370,6 +377,12 @@ public class StorageService extends AbstractService {
 
         boolean isSlop = store.getName().compareTo(SlopStorageEngine.SLOP_STORE_NAME) == 0;
         boolean isMetadata = store.getName().compareTo(MetadataStore.METADATA_STORE_NAME) == 0;
+
+        // TODO: use a separate store for partition versions (second parameter)
+        if(null != storeDef && storeDef.isVersionedPartition()) {
+            store = new VersionedPartitionStore(store, engine, metadata, storeDef);
+        }
+
         if(voldemortConfig.isVerboseLoggingEnabled())
             store = new LoggingStore<ByteArray, byte[], byte[]>(store,
                                                                 cluster.getName(),
