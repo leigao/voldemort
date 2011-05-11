@@ -71,8 +71,8 @@ public class InconsistencyResolvingStore<K, V, T> extends DelegatingStore<K, V, 
         int lastEntryIndex = versionedList.size() - 1;
 
         if(lastEntryIndex >= 0) {
-            partitionVersion = (VectorClock) versionedList.get(lastEntryIndex).getVersion();
-            if(partitionVersion.getEntries().get(0).getNodeId() == Short.MAX_VALUE) {
+            VectorClock lastVersion = (VectorClock) versionedList.get(lastEntryIndex).getVersion();
+            if(lastVersion.getEntries().get(0).getNodeId() == Short.MAX_VALUE) {
                 partitionVersion = (VectorClock) versionedList.remove(lastEntryIndex).getVersion();
             }
         }
@@ -96,8 +96,8 @@ public class InconsistencyResolvingStore<K, V, T> extends DelegatingStore<K, V, 
         int lastEntryIndex = versionList.size() - 1;
 
         if(lastEntryIndex >= 0) {
-            partitionVersion = (VectorClock) versionList.get(lastEntryIndex);
-            if(partitionVersion.getEntries().get(0).getNodeId() == Short.MAX_VALUE) {
+            VectorClock lastVersion = (VectorClock) versionList.get(lastEntryIndex);
+            if(lastVersion.getEntries().get(0).getNodeId() == Short.MAX_VALUE) {
                 partitionVersion = (VectorClock) versionList.remove(lastEntryIndex);
             }
         }
@@ -192,7 +192,7 @@ public class InconsistencyResolvingStore<K, V, T> extends DelegatingStore<K, V, 
                 // TODO: remove this hack by change 10 to replication factor of
                 // this store.
                 List<ClockEntry> entryList = Lists.newArrayList();
-                for(short i = 0; i < 10; i++) {
+                for(short i = 0; i < 5; i++) {
                     entryList.add(new ClockEntry(i, partitionVersion.getMaxVersion()));
                 }
                 versionList.add(new VectorClock(entryList, partitionVersion.getTimestamp()));
