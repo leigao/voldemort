@@ -64,6 +64,7 @@ import voldemort.store.StorageConfiguration;
 import voldemort.store.StorageEngine;
 import voldemort.store.Store;
 import voldemort.store.StoreDefinition;
+import voldemort.store.bdb.StreamingBdbStorageConfiguration;
 import voldemort.store.consistentpartition.VersionedPartitionStore;
 import voldemort.store.grandfather.GrandfatheringStore;
 import voldemort.store.invalidmetadata.InvalidMetadataCheckingStore;
@@ -288,6 +289,9 @@ public class StorageService extends AbstractService {
                                                                                                        metadata.getCluster());
 
             ((ReadOnlyStorageConfiguration) config).setRoutingStrategy(routingStrategy);
+        } else if(storeDef.getType().compareTo(StreamingBdbStorageConfiguration.TYPE_NAME) == 0) {
+            boolean isLogStream = storeDef.isLogStream();
+            ((StreamingBdbStorageConfiguration) config).setLogStream(isLogStream);
         }
 
         final StorageEngine<ByteArray, byte[], byte[]> engine = config.getStore(storeDef.getName());

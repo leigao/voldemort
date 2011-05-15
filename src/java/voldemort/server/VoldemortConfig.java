@@ -26,6 +26,7 @@ import voldemort.client.protocol.RequestFormatType;
 import voldemort.cluster.failuredetector.FailureDetectorConfig;
 import voldemort.server.scheduler.slop.StreamingSlopPusherJob;
 import voldemort.store.bdb.BdbStorageConfiguration;
+import voldemort.store.bdb.StreamingBdbStorageConfiguration;
 import voldemort.store.memory.CacheStorageConfiguration;
 import voldemort.store.memory.InMemoryStorageConfiguration;
 import voldemort.store.mysql.MysqlStorageConfiguration;
@@ -50,6 +51,12 @@ public class VoldemortConfig implements Serializable {
     public static final String VOLDEMORT_HOME_VAR_NAME = "VOLDEMORT_HOME";
     private static final String VOLDEMORT_NODE_ID_VAR_NAME = "VOLDEMORT_NODE_ID";
     public static int VOLDEMORT_DEFAULT_ADMIN_PORT = 6660;
+
+    private static final String DEFAULT_STREAMER_SERVER_URL = "localhost";
+    private static final int DEFAULT_STREAMER_SERVER_PORT = 9092;
+    private static final int DEFAULT_STREAMER_BUFFER_SIZE = 64 * 1024;
+    private static final long DEFAULT_STREAMER_CONN_TIMEOUT = 100000;
+    private static final int DEFAULT_STREAMER_RECONN_INTERVAL = 10000;
 
     private int nodeId;
 
@@ -170,14 +177,23 @@ public class VoldemortConfig implements Serializable {
     private int retentionCleanupScheduledPeriodInHour;
 
     private int maxRebalancingAttempt;
+
     private int rebalancingTimeoutInSeconds;
     private int rebalancingServicePeriod;
     private int maxParallelStoresRebalancing;
+
+    private String _streamerServerURL = DEFAULT_STREAMER_SERVER_URL;
+    private int _streamerServerPort = DEFAULT_STREAMER_SERVER_PORT;
+    private int _streamerBufferSize = DEFAULT_STREAMER_BUFFER_SIZE;
+    private long _streamerConnectionTimeout = DEFAULT_STREAMER_CONN_TIMEOUT;
+    private int _streamerReconnectInterval = DEFAULT_STREAMER_RECONN_INTERVAL;
 
     public VoldemortConfig(Properties props) {
         this(new Props(props));
     }
 
+    // TODO: read in kafka specific properties
+    // they are using the default value for now.
     public VoldemortConfig(Props props) {
         try {
             this.nodeId = props.getInt("node.id");
@@ -302,7 +318,8 @@ public class VoldemortConfig implements Serializable {
                                                                     MysqlStorageConfiguration.class.getName(),
                                                                     InMemoryStorageConfiguration.class.getName(),
                                                                     CacheStorageConfiguration.class.getName(),
-                                                                    ReadOnlyStorageConfiguration.class.getName()));
+                                                                    ReadOnlyStorageConfiguration.class.getName(),
+                                                                    StreamingBdbStorageConfiguration.class.getName()));
 
         // start at midnight (0-23)
         this.retentionCleanupFirstStartTimeInHour = props.getInt("retention.cleanup.first.start.hour",
@@ -1403,6 +1420,46 @@ public class VoldemortConfig implements Serializable {
 
     public void setMaxParallelStoresRebalancing(int maxParallelStoresRebalancing) {
         this.maxParallelStoresRebalancing = maxParallelStoresRebalancing;
+    }
+
+    public String getStreamerServerURL() {
+        return _streamerServerURL;
+    }
+
+    public void setStreamerServerURL(String streamerServerURL) {
+        _streamerServerURL = streamerServerURL;
+    }
+
+    public int getStreamerServerPort() {
+        return _streamerServerPort;
+    }
+
+    public void setStreamerServerPort(int streamerServerPort) {
+        _streamerServerPort = streamerServerPort;
+    }
+
+    public int getStreamerBufferSize() {
+        return _streamerBufferSize;
+    }
+
+    public void setStreamerBufferSize(int streamerBufferSize) {
+        _streamerBufferSize = streamerBufferSize;
+    }
+
+    public long getStreamerConnectionTimeout() {
+        return _streamerConnectionTimeout;
+    }
+
+    public void setStreamerConnectionTimeout(long streamerConnectionTimeout) {
+        _streamerConnectionTimeout = streamerConnectionTimeout;
+    }
+
+    public int getStreamerReconnectInterval() {
+        return _streamerReconnectInterval;
+    }
+
+    public void setStreamerReconnectInterval(int streamerReconnectInterval) {
+        _streamerReconnectInterval = streamerReconnectInterval;
     }
 
 }

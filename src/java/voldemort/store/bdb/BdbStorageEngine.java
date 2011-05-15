@@ -72,14 +72,17 @@ public class BdbStorageEngine implements StorageEngine<ByteArray, byte[], byte[]
     private final String name;
     private Database bdbDatabase;
     private final Environment environment;
-    private final VersionedSerializer<byte[]> versionedSerializer;
+    protected final VersionedSerializer<byte[]> versionedSerializer;
     private final AtomicBoolean isOpen;
     private final boolean cursorPreload;
     private final LockMode readLockMode;
     private final Serializer<Version> versionSerializer;
     private final AtomicBoolean isTruncating = new AtomicBoolean(false);
 
-    public BdbStorageEngine(String name, Environment environment, Database database, LockMode readLockMode) {
+    public BdbStorageEngine(String name,
+                            Environment environment,
+                            Database database,
+                            LockMode readLockMode) {
         this(name, environment, database, readLockMode, false);
     }
 
@@ -256,10 +259,7 @@ public class BdbStorageEngine implements StorageEngine<ByteArray, byte[], byte[]
         try {
             cursor = getBdbDatabase().openCursor(null, null);
             for(ByteArray key: keys) {
-                List<Versioned<byte[]>> values = get(cursor,
-                                                     key,
-                                                     readLockMode,
-                                                     versionedSerializer);
+                List<Versioned<byte[]>> values = get(cursor, key, readLockMode, versionedSerializer);
                 if(!values.isEmpty())
                     result.put(key, values);
             }
@@ -325,8 +325,8 @@ public class BdbStorageEngine implements StorageEngine<ByteArray, byte[], byte[]
 
             // Okay so we cleaned up all the prior stuff, so now we are good to
             // insert the new thing
-            valueEntry = new DatabaseEntry(versionedSerializer.toBytes(value));
-            OperationStatus status = cursor.put(keyEntry, valueEntry);
+            // TODO: this API is ugly, fix it!
+            OperationStatus status = putInternal(cursor, keyEntry, value);
             if(status != OperationStatus.SUCCESS)
                 throw new PersistenceFailureException("Put operation failed with status: " + status);
             succeeded = true;
@@ -341,6 +341,13 @@ public class BdbStorageEngine implements StorageEngine<ByteArray, byte[], byte[]
             else
                 attemptAbort(transaction);
         }
+    }
+
+    protected OperationStatus putInternal(Cursor cursor,
+                                          DatabaseEntry keyEntry,
+                                          Versioned<byte[]> value) {
+        DatabaseEntry valueEntry = new DatabaseEntry(versionedSerializer.toBytes(value));
+        return cursor.put(keyEntry, valueEntry);
     }
 
     public boolean delete(ByteArray key, Version version) throws PersistenceFailureException {

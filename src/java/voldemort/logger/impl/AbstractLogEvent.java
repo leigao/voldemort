@@ -58,4 +58,19 @@ public class AbstractLogEvent implements VoldemortLogEvent {
         st.append("value=" + _value + " ");
         return st.toString();
     }
+
+    public byte[] toBytes() {
+        byte[] keyBytes = _key.get();
+        byte[] versionBytes = _version.toBytes();
+        byte[] valueBytes = _value.getValue();
+        byte[] eventBytes = new byte[keyBytes.length + versionBytes.length + valueBytes.length];
+        int eventBytesPosition = 0;
+        System.arraycopy(keyBytes, 0, eventBytes, eventBytesPosition, keyBytes.length);
+        eventBytesPosition += keyBytes.length;
+        System.arraycopy(versionBytes, 0, eventBytes, eventBytesPosition, versionBytes.length);
+        eventBytesPosition += versionBytes.length;
+        System.arraycopy(valueBytes, 0, eventBytes, eventBytesPosition, valueBytes.length);
+        eventBytesPosition += valueBytes.length;
+        return eventBytes;
+    }
 }
