@@ -15,4 +15,16 @@
 		<nature>org.eclipse.jdt.core.javanature</nature>
 		<nature>com.sysdeo.eclipse.tomcat.tomcatnature</nature>
 	</natures>
+	<linkedResources>
+		<link>
+			<name>streamer</name>
+			<type>2</type>
+			<location>/Users/lgao/Projects/voldemort/contrib/streamer</location>
+		</link>
+		<link>
+			<name>contrib/streamer</name>
+			<type>2</type>
+			<location>/Users/lgao/Projects/voldemort/contrib/streamer</location>
+		</link>
+	</linkedResources>
 </projectDescription>

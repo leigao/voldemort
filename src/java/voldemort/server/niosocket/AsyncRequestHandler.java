@@ -141,7 +141,6 @@ public class AsyncRequestHandler extends SelectorManagerWorker {
             // If we have data, write what we can now...
             try {
                 int count = socketChannel.write(outputStream.getBuffer());
-
                 if(logger.isTraceEnabled())
                     logger.trace("Wrote " + count + " bytes, remaining: "
                                  + outputStream.getBuffer().remaining() + " for "

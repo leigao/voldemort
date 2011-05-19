@@ -58,7 +58,8 @@ public class VersionedPartitionStore extends DelegatingStore<ByteArray, byte[], 
     private ByteArray getPartitionKey(ByteArray entryKey) {
         Integer partitionId = _routingStrategy.getPartitionList(entryKey.get()).get(0);
         String key = _storeDef.getName() + "_P" + partitionId;
-        logger.info("leigao4 Partition key=" + key + " used for key=" + new String(entryKey.get()));
+        // logger.debug("leigao4 Partition key=" + key + " used for key=" + new
+        // String(entryKey.get()));
         return new ByteArray(key.getBytes());
     }
 
@@ -70,7 +71,7 @@ public class VersionedPartitionStore extends DelegatingStore<ByteArray, byte[], 
         for(Iterator<Versioned<byte[]>> it = versionedList.iterator(); it.hasNext();) {
             String stringVersion = serializer.toObject(it.next().getValue());
             VectorClock tmpVersion = new VectorClock(stringVersion.getBytes());
-            logger.info("leigao: " + tmpVersion);
+            logger.debug("leigao: " + tmpVersion);
             long localMax = tmpVersion.getMaxVersion();
             if(localMax > maxVersion) {
                 maxVersion = localMax;
@@ -78,7 +79,7 @@ public class VersionedPartitionStore extends DelegatingStore<ByteArray, byte[], 
             }
         }
 
-        logger.info("leigao3: " + maxVersion);
+        logger.debug("leigao3: " + maxVersion);
 
         if(0 < maxVersion) {
             // this is a hack: Short.MAX_VALUE is where the partition version is
@@ -126,7 +127,7 @@ public class VersionedPartitionStore extends DelegatingStore<ByteArray, byte[], 
 
         Version partitionVersion = getPartitionVersionWithCache(key, partitionVersionCache);
         if(null != partitionVersion) {
-            logger.info("leigao7: " + partitionVersion);
+            logger.debug("leigao7: " + partitionVersion);
             versionList.add(partitionVersion);
         }
     }
@@ -189,8 +190,8 @@ public class VersionedPartitionStore extends DelegatingStore<ByteArray, byte[], 
             partitionVersion = ((VectorClock) value.getVersion()).clone()
                                                                  .setAllEntries(partitionVersion.getMaxVersion());
         }
-        logger.info("leigao: partitionVersion=" + partitionVersion);
-        logger.info("leigao: putVersion=" + value.getVersion());
+        logger.debug("leigao: partitionVersion=" + partitionVersion);
+        logger.debug("leigao: putVersion=" + value.getVersion());
         // if value is 'before' partition version, throw exception
         if(null != partitionVersion
            && Occured.BEFORE == value.getVersion().compare(partitionVersion)) {
