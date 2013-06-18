@@ -120,7 +120,7 @@ public class AdminServiceRequestHandler implements RequestHandler {
 
     private void setFetcherClass(VoldemortConfig voldemortConfig) {
         if(voldemortConfig != null) {
-            String className = voldemortConfig.getAllProps().getString("file.fetcher.class", null);
+            String className = voldemortConfig.getFileFetcherClass();
             if(className == null || className.trim().length() == 0) {
                 this.fileFetcher = null;
             } else {
@@ -548,33 +548,33 @@ public class AdminServiceRequestHandler implements RequestHandler {
         if(fetchValues) {
             if(storageEngine.isPartitionScanSupported() && !fetchOrphaned)
                 return new PartitionScanFetchEntriesRequestHandler(request,
-                                                                     metadataStore,
-                                                                     errorCodeMapper,
-                                                                     voldemortConfig,
-                                                                     storeRepository,
-                                                                     networkClassLoader);
+                                                                   metadataStore,
+                                                                   errorCodeMapper,
+                                                                   voldemortConfig,
+                                                                   storeRepository,
+                                                                   networkClassLoader);
             else
                 return new FullScanFetchEntriesRequestHandler(request,
-                                                            metadataStore,
-                                                            errorCodeMapper,
-                                                            voldemortConfig,
-                                                            storeRepository,
-                                                            networkClassLoader);
+                                                              metadataStore,
+                                                              errorCodeMapper,
+                                                              voldemortConfig,
+                                                              storeRepository,
+                                                              networkClassLoader);
         } else {
             if(storageEngine.isPartitionScanSupported() && !fetchOrphaned)
                 return new PartitionScanFetchKeysRequestHandler(request,
-                                                                  metadataStore,
-                                                                  errorCodeMapper,
-                                                                  voldemortConfig,
-                                                                  storeRepository,
-                                                                  networkClassLoader);
+                                                                metadataStore,
+                                                                errorCodeMapper,
+                                                                voldemortConfig,
+                                                                storeRepository,
+                                                                networkClassLoader);
             else
                 return new FullScanFetchKeysRequestHandler(request,
-                                                         metadataStore,
-                                                         errorCodeMapper,
-                                                         voldemortConfig,
-                                                         storeRepository,
-                                                         networkClassLoader);
+                                                           metadataStore,
+                                                           errorCodeMapper,
+                                                           voldemortConfig,
+                                                           storeRepository,
+                                                           networkClassLoader);
         }
     }
 
