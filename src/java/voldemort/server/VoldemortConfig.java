@@ -212,6 +212,7 @@ public class VoldemortConfig implements Serializable {
 
     private long streamMaxReadBytesPerSec;
     private long streamMaxWriteBytesPerSec;
+    private boolean multiVersionStreamingPutsEnabled;
     private int gossipIntervalMs;
 
     private String failureDetectorImplementation;
@@ -233,6 +234,7 @@ public class VoldemortConfig implements Serializable {
     private int maxParallelStoresRebalancing;
     private boolean rebalancingOptimization;
     private boolean usePartitionScanForRebalance;
+    private int maxProxyPutThreads;
     @Deprecated
     // Should be removed once the proxy put implementation is stable.
     private boolean proxyPutsDuringRebalance;
@@ -371,6 +373,8 @@ public class VoldemortConfig implements Serializable {
         this.streamMaxReadBytesPerSec = props.getBytes("stream.read.byte.per.sec", 10 * 1000 * 1000);
         this.streamMaxWriteBytesPerSec = props.getBytes("stream.write.byte.per.sec",
                                                         10 * 1000 * 1000);
+        this.multiVersionStreamingPutsEnabled = props.getBoolean("use.multi.version.streaming.puts",
+                                                                 true);
 
         this.socketTimeoutMs = props.getInt("socket.timeout.ms", 5000);
         this.socketBufferSize = (int) props.getBytes("socket.buffer.size", 64 * 1024);
@@ -484,7 +488,8 @@ public class VoldemortConfig implements Serializable {
         this.rebalancingOptimization = props.getBoolean("rebalancing.optimization", true);
         this.usePartitionScanForRebalance = props.getBoolean("use.partition.scan.for.rebalance",
                                                              true);
-        this.proxyPutsDuringRebalance = props.getBoolean("proxy.puts.during.rebalance", false);
+        this.maxProxyPutThreads = props.getInt("max.proxy.put.threads", 1);
+        this.proxyPutsDuringRebalance = props.getBoolean("proxy.puts.during.rebalance", true);
 
         this.failureDetectorImplementation = props.getString("failuredetector.implementation",
                                                              FailureDetectorConfig.DEFAULT_IMPLEMENTATION_CLASS_NAME);
@@ -1480,6 +1485,25 @@ public class VoldemortConfig implements Serializable {
 
     public long getSlopMaxWriteBytesPerSec() {
         return slopMaxWriteBytesPerSec;
+    }
+
+    /**
+     * If true, multiple successive versions of the same key, will be atomically
+     * written to storage in a single operation. Currently not supported for
+     * MySqlStorageEngine
+     * 
+     * <ul>
+     * <li>Property : "use.multi.version.streaming.puts"</li>
+     * <li>Default : true</li>
+     * </ul>
+     * 
+     */
+    public void setMultiVersionStreamingPutsEnabled(boolean multiVersionStreamingPutsEnabled) {
+        this.multiVersionStreamingPutsEnabled = multiVersionStreamingPutsEnabled;
+    }
+
+    public boolean getMultiVersionStreamingPutsEnabled() {
+        return this.multiVersionStreamingPutsEnabled;
     }
 
     /**
@@ -2692,6 +2716,22 @@ public class VoldemortConfig implements Serializable {
 
     public boolean usePartitionScanForRebalance() {
         return usePartitionScanForRebalance;
+    }
+
+    /**
+     * Total number of threads needed to issue proxy puts during rebalancing
+     * 
+     * <ul>
+     * <li>Property :"max.proxy.put.threads"</li>
+     * <li>Default : 1</li>
+     * </ul>
+     */
+    public void setMaxProxyPutThreads(int maxProxyPutThreads) {
+        this.maxProxyPutThreads = maxProxyPutThreads;
+    }
+
+    public int getMaxProxyPutThreads() {
+        return this.maxProxyPutThreads;
     }
 
     /**

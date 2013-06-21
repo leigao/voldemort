@@ -22,10 +22,14 @@ import java.io.FileReader;
 import java.io.FileWriter;
 import java.io.IOException;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.LinkedList;
 import java.util.List;
 import java.util.Map;
+import java.util.Properties;
 import java.util.Queue;
+import java.util.Set;
+import java.util.TreeSet;
 import java.util.concurrent.Callable;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
@@ -45,13 +49,14 @@ import voldemort.client.ClientConfig;
 import voldemort.client.protocol.admin.AdminClient;
 import voldemort.client.protocol.admin.AdminClientConfig;
 import voldemort.cluster.Cluster;
+import voldemort.routing.StoreRoutingPlan;
 import voldemort.store.StoreDefinition;
 import voldemort.versioning.Versioned;
 
 /**
  * The KeyVersionFetcherCLI is a rudimentary tool that outputs a sampling of
  * existing keys from a cluster. For each store in the cluster, a distinct file
- * of keys to sample is expected. And, for each of these, a distint file of
+ * of keys to sample is expected. And, for each of these, a distinct file of
  * key-versions is generated.
  * 
  */
@@ -61,17 +66,19 @@ public class KeyVersionFetcherCLI {
 
     private final static int DEFAULT_KEY_PARALLELISM = 4;
     private final static int DEFAULT_PROGRESS_PERIOD_OPS = 1000;
+    private final static int DEFAULT_OUTPUT_BATCH_SIZE = 100;
 
     private final AdminClient adminClient;
     private final Cluster cluster;
     private final List<StoreDefinition> storeDefinitions;
-    private final Map<String, StringBuilder> storeNameToKeyStringsMap;
+    private final Set<String> storeNamesSet;
 
     private final String inDir;
     private final String outDir;
 
     private final ExecutorService kvFetcherService;
     private final int progressPeriodOps;
+    private final int outputBatchSize;
 
     private final long startTimeMs;
     private static AtomicInteger fetches = new AtomicInteger(0);
@@ -81,14 +88,25 @@ public class KeyVersionFetcherCLI {
                                 String outDir,
                                 List<String> storeNames,
                                 int keyParallelism,
-                                int progressPeriodOps) {
+                                int progressPeriodOps,
+                                int outputBatchSize) {
         if(logger.isInfoEnabled()) {
             logger.info("Connecting to bootstrap server: " + url);
         }
-        this.adminClient = new AdminClient(url, new AdminClientConfig(), new ClientConfig());
+
+        Properties clientProps = new Properties();
+        clientProps.put("connection_timeout_ms", "2500");
+        clientProps.put("max_connections", Integer.toString(keyParallelism));
+        clientProps.put("routing_timeout_ms", "10000");
+        clientProps.put("socket_timeout_ms", "10000");
+        clientProps.put("failuredetector_threshold", "10");
+
+        this.adminClient = new AdminClient(url,
+                                           new AdminClientConfig(),
+                                           new ClientConfig(clientProps));
         this.cluster = adminClient.getAdminClientCluster();
         this.storeDefinitions = adminClient.metadataMgmtOps.getRemoteStoreDefList(0).getValue();
-        this.storeNameToKeyStringsMap = new HashMap<String, StringBuilder>();
+        this.storeNamesSet = new HashSet<String>();
         for(StoreDefinition storeDefinition: storeDefinitions) {
             String storeName = storeDefinition.getName();
             if(storeNames != null) {
@@ -99,13 +117,13 @@ public class KeyVersionFetcherCLI {
                     continue;
                 }
             }
-            this.storeNameToKeyStringsMap.put(storeName, new StringBuilder());
+            this.storeNamesSet.add(storeName);
         }
 
         if(storeNames != null) {
             List<String> badStoreNames = new LinkedList<String>();
             for(String storeName: storeNames) {
-                if(!this.storeNameToKeyStringsMap.keySet().contains(storeName)) {
+                if(!this.storeNamesSet.contains(storeName)) {
                     badStoreNames.add(storeName);
                 }
             }
@@ -121,13 +139,16 @@ public class KeyVersionFetcherCLI {
         this.kvFetcherService = Executors.newFixedThreadPool(keyParallelism);
 
         this.progressPeriodOps = progressPeriodOps;
+        this.outputBatchSize = outputBatchSize;
         this.startTimeMs = System.currentTimeMillis();
     }
 
     public boolean sampleStores() {
         for(StoreDefinition storeDefinition: storeDefinitions) {
-            if(storeNameToKeyStringsMap.keySet().contains(storeDefinition.getName())) {
+            if(storeNamesSet.contains(storeDefinition.getName())) {
                 if(!sampleStore(storeDefinition)) {
+                    logger.info("Problem sampling store " + storeDefinition.getName()
+                                + ".. Bailing..");
                     return false;
                 }
             }
@@ -135,49 +156,98 @@ public class KeyVersionFetcherCLI {
         return true;
     }
 
-    public void updateFetchProgress() {
+    public void updateFetchProgress(String storeName) {
         int curFetches = fetches.incrementAndGet();
 
         if(0 == curFetches % progressPeriodOps) {
             if(logger.isInfoEnabled()) {
                 long durationS = TimeUnit.MILLISECONDS.toSeconds(System.currentTimeMillis()
                                                                  - startTimeMs);
-                logger.info("Fetched " + curFetches + "  in " + durationS + " seconds.");
+                logger.info("Fetched " + curFetches + "  in " + durationS + " seconds for store "
+                            + storeName);
             }
         }
     }
 
-    public class KeyVersionFetcher implements Callable<String> {
+    public class ZoneToNaryToString {
 
-        private final StoreInstance storeInstance;
+        Map<Integer, Map<Integer, Set<String>>> zoneToNaryToString;
+
+        ZoneToNaryToString() {
+            zoneToNaryToString = new HashMap<Integer, Map<Integer, Set<String>>>();
+        }
+
+        public void addZoneNaryString(int zoneId, int zoneNAry, String string) {
+            if(!zoneToNaryToString.containsKey(zoneId)) {
+                zoneToNaryToString.put(zoneId, new HashMap<Integer, Set<String>>());
+            }
+            if(!zoneToNaryToString.get(zoneId).containsKey(zoneNAry)) {
+                zoneToNaryToString.get(zoneId).put(zoneNAry, new TreeSet<String>());
+            }
+            zoneToNaryToString.get(zoneId).get(zoneNAry).add(string);
+        }
+
+        @Override
+        public String toString() {
+            StringBuilder sb = new StringBuilder();
+
+            Set<Integer> sortedZoneIds = new TreeSet<Integer>(zoneToNaryToString.keySet());
+            for(int zoneId: sortedZoneIds) {
+                Set<Integer> sortedZoneNAries = new TreeSet<Integer>(zoneToNaryToString.get(zoneId)
+                                                                                       .keySet());
+                for(int zoneNary: sortedZoneNAries) {
+                    for(String string: zoneToNaryToString.get(zoneId).get(zoneNary)) {
+                        sb.append(zoneId)
+                          .append(" : ")
+                          .append(zoneNary)
+                          .append(" : ")
+                          .append(string)
+                          .append("\n");
+                    }
+                }
+            }
+            return sb.toString();
+        }
+    }
+
+    public class FetchKeyVersionsTask implements Callable<String> {
+
+        private final StoreRoutingPlan storeRoutingPlan;
         private final byte[] key;
 
-        KeyVersionFetcher(StoreInstance storeInstance, byte[] key) {
-            this.storeInstance = storeInstance;
+        FetchKeyVersionsTask(StoreRoutingPlan storeRoutingPlan, byte[] key) {
+            this.storeRoutingPlan = storeRoutingPlan;
             this.key = key;
         }
 
         @Override
         public String call() throws Exception {
-            String storeName = storeInstance.getStoreDefinition().getName();
-            int masterPartitionId = storeInstance.getMasterPartitionId(key);
-            List<Integer> replicatingNodeIds = storeInstance.getReplicationNodeList(masterPartitionId);
+            String storeName = storeRoutingPlan.getStoreDefinition().getName();
+            int masterPartitionId = storeRoutingPlan.getMasterPartitionId(key);
+            List<Integer> replicatingNodeIds = storeRoutingPlan.getReplicationNodeList(masterPartitionId);
 
-            int replicationOffset = 0;
-            StringBuilder sb = new StringBuilder();
+            ZoneToNaryToString zoneToNaryToString = new ZoneToNaryToString();
+
             for(int replicatingNodeId: replicatingNodeIds) {
                 List<Versioned<byte[]>> values = adminClient.storeOps.getNodeKey(storeName,
                                                                                  replicatingNodeId,
                                                                                  new ByteArray(key));
-                sb.append(replicationOffset + " : " + ByteUtils.toHexString(key) + "\t");
+                int zoneId = storeRoutingPlan.getCluster()
+                                             .getNodeById(replicatingNodeId)
+                                             .getZoneId();
+                int zoneNAry = storeRoutingPlan.getZoneNAry(zoneId, replicatingNodeId, key);
+
+                StringBuilder sb = new StringBuilder();
+                sb.append(ByteUtils.toHexString(key));
                 for(Versioned<byte[]> value: values) {
-                    sb.append(value.getVersion().toString() + "\t");
+                    sb.append(" : ").append(value.getVersion().toString());
                 }
-                sb.append("\n");
-                replicationOffset++;
+
+                zoneToNaryToString.addZoneNaryString(zoneId, zoneNAry, sb.toString());
             }
-            updateFetchProgress();
-            return sb.toString();
+
+            updateFetchProgress(storeName);
+            return zoneToNaryToString.toString();
         }
     }
 
@@ -187,7 +257,7 @@ public class KeyVersionFetcherCLI {
         String keysFileName = inDir + System.getProperty("file.separator") + storeName + ".keys";
         File keysFile = new File(keysFileName);
         if(!keysFile.exists()) {
-            logger.error("Keys file " + keysFileName + "does not exist!");
+            logger.error("Keys file " + keysFileName + " does not exist!");
             return false;
         }
 
@@ -199,44 +269,49 @@ public class KeyVersionFetcherCLI {
             return true;
         }
 
-        StoreInstance storeInstance = new StoreInstance(cluster, storeDefinition);
+        StoreRoutingPlan storeRoutingPlan = new StoreRoutingPlan(cluster, storeDefinition);
         BufferedReader keyReader = null;
         BufferedWriter kvWriter = null;
         try {
             keyReader = new BufferedReader(new FileReader(keysFileName));
-
-            Queue<Future<String>> futureKVs = new LinkedList<Future<String>>();
-            for(String keyLine = keyReader.readLine(); keyLine != null; keyLine = keyReader.readLine()) {
-                byte[] keyInBytes = ByteUtils.fromHexString(keyLine.trim());
-
-                KeyVersionFetcher kvFetcher = new KeyVersionFetcher(storeInstance, keyInBytes);
-                Future<String> future = kvFetcherService.submit(kvFetcher);
-                futureKVs.add(future);
-            }
-
             kvWriter = new BufferedWriter(new FileWriter(kvFileName));
-            while(!futureKVs.isEmpty()) {
-                Future<String> future = futureKVs.poll();
-                String keyVersions = future.get();
-                kvWriter.append(keyVersions);
-            }
 
+            boolean readAllKeys = false;
+            while(!readAllKeys) {
+                Queue<Future<String>> futureKVs = new LinkedList<Future<String>>();
+                for(int numFetchTasks = 0; numFetchTasks < this.outputBatchSize; numFetchTasks++) {
+                    String keyLine = keyReader.readLine();
+                    if(keyLine == null) {
+                        readAllKeys = true;
+                        break;
+                    }
+                    byte[] keyInBytes = ByteUtils.fromHexString(keyLine.trim());
+                    FetchKeyVersionsTask kvFetcher = new FetchKeyVersionsTask(storeRoutingPlan,
+                                                                              keyInBytes);
+                    Future<String> future = kvFetcherService.submit(kvFetcher);
+                    futureKVs.add(future);
+                }
+
+                if(futureKVs.size() > 0) {
+                    while(!futureKVs.isEmpty()) {
+                        Future<String> future = futureKVs.poll();
+                        String keyVersions = future.get();
+                        kvWriter.append(keyVersions);
+                    }
+                }
+            }
             return true;
         } catch(DecoderException de) {
-            logger.error("Could not decode key to sample for store " + storeName + " : "
-                         + de.getMessage());
+            logger.error("Could not decode key to sample for store " + storeName, de);
             return false;
         } catch(IOException ioe) {
-            logger.error("IOException caught while sampling store " + storeName + " : "
-                         + ioe.getMessage());
+            logger.error("IOException caught while sampling store " + storeName, ioe);
             return false;
         } catch(InterruptedException ie) {
-            logger.error("InterruptedException caught while sampling store " + storeName + " : "
-                         + ie.getMessage());
+            logger.error("InterruptedException caught while sampling store " + storeName, ie);
             return false;
         } catch(ExecutionException ee) {
-            logger.error("Encountered an execution exception while sampling " + storeName + ": "
-                         + ee.getMessage());
+            logger.error("Encountered an execution exception while sampling " + storeName, ee);
             ee.printStackTrace();
             return false;
         } finally {
@@ -245,7 +320,7 @@ public class KeyVersionFetcherCLI {
                     keyReader.close();
                 } catch(IOException e) {
                     logger.error("IOException caught while trying to close keyReader for store "
-                                 + storeName + " : " + e.getMessage());
+                                 + storeName, e);
                     e.printStackTrace();
                 }
             }
@@ -254,7 +329,7 @@ public class KeyVersionFetcherCLI {
                     kvWriter.close();
                 } catch(IOException e) {
                     logger.error("IOException caught while trying to close kvWriter for store "
-                                 + storeName + " : " + e.getMessage());
+                                 + storeName, e);
                     e.printStackTrace();
                 }
             }
@@ -308,6 +383,12 @@ public class KeyVersionFetcherCLI {
               .withRequiredArg()
               .describedAs("progressPeriodOps")
               .ofType(Integer.class);
+        parser.accepts("output-batch-size",
+                       "Number of keys fetched and written out in sorted order at once. [Default: "
+                               + DEFAULT_OUTPUT_BATCH_SIZE + " ]")
+              .withRequiredArg()
+              .describedAs("outputBatchSize")
+              .ofType(Integer.class);
         return parser;
     }
 
@@ -327,6 +408,7 @@ public class KeyVersionFetcherCLI {
         help.append("    --store-names <storeName>[,<storeName>...]\n");
         help.append("    --parallelism <keyParallelism>\n");
         help.append("    --progress-period-ops <progressPeriodOps>\n");
+        help.append("    --output-batch-size <operationsInOutputBatch>\n");
         help.append("    --help\n");
         System.out.print(help.toString());
     }
@@ -390,13 +472,19 @@ public class KeyVersionFetcherCLI {
             progressPeriodOps = (Integer) options.valueOf("progress-period-ops");
         }
 
+        Integer outputBatchSize = DEFAULT_OUTPUT_BATCH_SIZE;
+        if(options.hasArgument("output-batch-size")) {
+            outputBatchSize = (Integer) options.valueOf("output-batch-size");
+        }
+
         try {
             KeyVersionFetcherCLI sampler = new KeyVersionFetcherCLI(url,
                                                                     inDir,
                                                                     outDir,
                                                                     storeNames,
                                                                     keyParallelism,
-                                                                    progressPeriodOps);
+                                                                    progressPeriodOps,
+                                                                    outputBatchSize);
 
             try {
                 if(!sampler.sampleStores()) {
@@ -407,8 +495,7 @@ public class KeyVersionFetcherCLI {
             }
 
         } catch(Exception e) {
-            Utils.croak("Exception during key-version sampling: " + e.getMessage());
+            logger.error("Exception during key-version sampling: ", e);
         }
-
     }
 }

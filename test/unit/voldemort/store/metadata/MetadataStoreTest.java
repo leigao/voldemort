@@ -1,5 +1,5 @@
 /*
- * Copyright 2008-2009 LinkedIn, Inc
+ * Copyright 2008-2013 LinkedIn, Inc
  * 
  * Licensed under the Apache License, Version 2.0 (the "License"); you may not
  * use this file except in compliance with the License. You may obtain a copy of
@@ -16,14 +16,21 @@
 
 package voldemort.store.metadata;
 
+import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertTrue;
+import static org.junit.Assert.fail;
+
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashMap;
 import java.util.List;
 
-import junit.framework.TestCase;
+import org.junit.Before;
+import org.junit.Test;
+
 import voldemort.ServerTestUtils;
 import voldemort.client.rebalance.RebalancePartitionsInfo;
+import voldemort.cluster.Cluster;
 import voldemort.server.rebalance.RebalancerState;
 import voldemort.store.metadata.MetadataStore.VoldemortState;
 import voldemort.utils.ByteArray;
@@ -36,7 +43,7 @@ import voldemort.xml.StoreDefinitionsMapper;
 
 import com.google.common.collect.Maps;
 
-public class MetadataStoreTest extends TestCase {
+public class MetadataStoreTest {
 
     private static int TEST_RUNS = 100;
 
@@ -44,11 +51,11 @@ public class MetadataStoreTest extends TestCase {
     private List<String> TEST_KEYS = Arrays.asList(MetadataStore.CLUSTER_KEY,
                                                    MetadataStore.STORES_KEY,
                                                    MetadataStore.REBALANCING_STEAL_INFO,
-                                                   MetadataStore.SERVER_STATE_KEY);
+                                                   MetadataStore.SERVER_STATE_KEY,
+                                                   MetadataStore.REBALANCING_SOURCE_CLUSTER_XML);
 
-    @Override
+    @Before
     public void setUp() throws Exception {
-        super.setUp();
         metadataStore = ServerTestUtils.createMetadataStore(ServerTestUtils.getLocalCluster(1),
                                                             ServerTestUtils.getStoreDefs(1));
     }
@@ -61,7 +68,8 @@ public class MetadataStoreTest extends TestCase {
 
     public byte[] getValidValue(ByteArray key) {
         String keyString = ByteUtils.getString(key.get(), "UTF-8");
-        if(MetadataStore.CLUSTER_KEY.equals(keyString)) {
+        if(MetadataStore.CLUSTER_KEY.equals(keyString)
+           || MetadataStore.REBALANCING_SOURCE_CLUSTER_XML.equals(keyString)) {
             return ByteUtils.getBytes(new ClusterMapper().writeCluster(ServerTestUtils.getLocalCluster(1)),
                                       "UTF-8");
         } else if(MetadataStore.STORES_KEY.equals(keyString)) {
@@ -87,15 +95,14 @@ public class MetadataStoreTest extends TestCase {
             return ByteUtils.getBytes(new RebalancerState(Arrays.asList(new RebalancePartitionsInfo(0,
                                                                                                     (int) Math.random() * 5,
                                                                                                     storeToReplicaToPartitionList,
-                                                                                                    storeToReplicaToPartitionList,
-                                                                                                    ServerTestUtils.getLocalCluster(1),
-                                                                                                    (int) Math.random() * 3))).toJsonString(),
+                                                                                                    ServerTestUtils.getLocalCluster(1)))).toJsonString(),
                                       "UTF-8");
         }
 
         throw new RuntimeException("Unhandled key:" + keyString + " passed");
     }
 
+    @Test
     public void testSimpleGetAndPut() {
         for(int i = 0; i <= TEST_RUNS; i++) {
             ByteArray key = getValidKey();
@@ -108,6 +115,7 @@ public class MetadataStoreTest extends TestCase {
         }
     }
 
+    @Test
     public void testRepeatedPuts() {
         for(int i = 0; i <= TEST_RUNS; i++) {
             for(int j = 0; j <= 5; j++) {
@@ -123,6 +131,7 @@ public class MetadataStoreTest extends TestCase {
         }
     }
 
+    @Test
     public void testObsoletePut() {
         for(int i = 0; i <= TEST_RUNS; i++) {
             ByteArray key = getValidKey();
@@ -141,6 +150,7 @@ public class MetadataStoreTest extends TestCase {
         }
     }
 
+    @Test
     public void testSynchronousPut() {
         for(int i = 0; i <= TEST_RUNS; i++) {
             ByteArray key = getValidKey();
@@ -160,6 +170,7 @@ public class MetadataStoreTest extends TestCase {
         }
     }
 
+    @Test
     public void testCleanAllStates() {
         // put state entries.
         incrementVersionAndPut(metadataStore,
@@ -167,7 +178,7 @@ public class MetadataStoreTest extends TestCase {
                                MetadataStore.VoldemortState.REBALANCING_MASTER_SERVER);
 
         assertEquals("Values should match.",
-                     metadataStore.getServerState(),
+                     metadataStore.getServerStateUnlocked(),
                      VoldemortState.REBALANCING_MASTER_SERVER);
 
         // do clean
@@ -175,8 +186,30 @@ public class MetadataStoreTest extends TestCase {
 
         // check all values revert back to default.
         assertEquals("Values should match.",
-                     metadataStore.getServerState(),
+                     metadataStore.getServerStateUnlocked(),
                      VoldemortState.NORMAL_SERVER);
+    }
+
+    @Test
+    public void testRebalacingSourceClusterXmlKey() {
+        metadataStore.cleanAllRebalancingState();
+
+        assertTrue("Should be null", null == metadataStore.getRebalancingSourceCluster());
+
+        Cluster dummyCluster = ServerTestUtils.getLocalCluster(2);
+        metadataStore.put(MetadataStore.REBALANCING_SOURCE_CLUSTER_XML, dummyCluster);
+        assertEquals("Should be equal", dummyCluster, metadataStore.getRebalancingSourceCluster());
+
+        metadataStore.put(MetadataStore.REBALANCING_SOURCE_CLUSTER_XML, (Object) null);
+        assertTrue("Should be null", null == metadataStore.getRebalancingSourceCluster());
+
+        List<Versioned<byte[]>> sourceClusterVersions = metadataStore.get(MetadataStore.REBALANCING_SOURCE_CLUSTER_XML,
+                                                                          null);
+        assertTrue("Just one version expected", 1 == sourceClusterVersions.size());
+        assertEquals("Empty string should map to null",
+                     "",
+                     new String(sourceClusterVersions.get(0).getValue()));
+
     }
 
     private void checkValues(Versioned<byte[]> value, List<Versioned<byte[]>> list, ByteArray key) {

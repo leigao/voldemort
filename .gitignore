@@ -14,3 +14,9 @@ server.state
 .temp
 .idea
 data/
+META-INF/MANIFEST.MF
+gc.log
+voldsys$_*
+.project
+.settings
+.pydevproject

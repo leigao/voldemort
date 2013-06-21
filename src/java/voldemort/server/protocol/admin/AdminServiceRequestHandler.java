@@ -41,6 +41,7 @@ import voldemort.client.protocol.pb.VAdminProto.VoldemortAdminRequest;
 import voldemort.client.rebalance.RebalancePartitionsInfo;
 import voldemort.cluster.Cluster;
 import voldemort.common.nio.ByteBufferBackedInputStream;
+import voldemort.routing.StoreRoutingPlan;
 import voldemort.server.StoreRepository;
 import voldemort.server.VoldemortConfig;
 import voldemort.server.protocol.RequestHandler;
@@ -55,6 +56,7 @@ import voldemort.store.StoreDefinitionBuilder;
 import voldemort.store.StoreOperationFailureException;
 import voldemort.store.backup.NativeBackupable;
 import voldemort.store.metadata.MetadataStore;
+import voldemort.store.mysql.MysqlStorageEngine;
 import voldemort.store.readonly.FileFetcher;
 import voldemort.store.readonly.ReadOnlyStorageConfiguration;
 import voldemort.store.readonly.ReadOnlyStorageEngine;
@@ -68,7 +70,6 @@ import voldemort.utils.NetworkClassLoader;
 import voldemort.utils.Pair;
 import voldemort.utils.RebalanceUtils;
 import voldemort.utils.ReflectUtils;
-import voldemort.utils.StoreInstance;
 import voldemort.utils.Utils;
 import voldemort.versioning.ObsoleteVersionException;
 import voldemort.versioning.VectorClock;
@@ -321,12 +322,14 @@ public class AdminServiceRequestHandler implements RequestHandler {
 
                 Cluster cluster = new ClusterMapper().readCluster(new StringReader(request.getClusterString()));
 
+                List<StoreDefinition> storeDefs = new StoreDefinitionsMapper().readStoreList(new StringReader(request.getStoresString()));
                 boolean swapRO = request.getSwapRo();
                 boolean changeClusterMetadata = request.getChangeClusterMetadata();
                 boolean changeRebalanceState = request.getChangeRebalanceState();
                 boolean rollback = request.getRollback();
 
                 rebalancer.rebalanceStateChange(cluster,
+                                                storeDefs,
                                                 rebalancePartitionsInfo,
                                                 swapRO,
                                                 changeClusterMetadata,
@@ -378,7 +381,7 @@ public class AdminServiceRequestHandler implements RequestHandler {
                                              + metadataStore.getNodeId());
 
             // We should be in rebalancing state to run this function
-            if(!metadataStore.getServerState()
+            if(!metadataStore.getServerStateUnlocked()
                              .equals(MetadataStore.VoldemortState.REBALANCING_MASTER_SERVER)) {
                 response.setError(ProtoUtils.encodeError(errorCodeMapper,
                                                          new VoldemortException("Voldemort server "
@@ -579,11 +582,26 @@ public class AdminServiceRequestHandler implements RequestHandler {
     }
 
     public StreamRequestHandler handleUpdatePartitionEntries(VAdminProto.UpdatePartitionEntriesRequest request) {
-        return new UpdatePartitionEntriesStreamRequestHandler(request,
-                                                              errorCodeMapper,
-                                                              voldemortConfig,
-                                                              storeRepository,
-                                                              networkClassLoader);
+        StorageEngine<ByteArray, byte[], byte[]> storageEngine = AdminServiceRequestHandler.getStorageEngine(storeRepository,
+                                                                                                             request.getStore());
+        if(!voldemortConfig.getMultiVersionStreamingPutsEnabled()
+           || storageEngine instanceof MysqlStorageEngine) {
+            // TODO This check is ugly. Need some generic capability to check
+            // which storage engine supports which operations.
+            return new UpdatePartitionEntriesStreamRequestHandler(request,
+                                                                  errorCodeMapper,
+                                                                  voldemortConfig,
+                                                                  storageEngine,
+                                                                  storeRepository,
+                                                                  networkClassLoader);
+        } else {
+            return new BufferedUpdatePartitionEntriesStreamRequestHandler(request,
+                                                                          errorCodeMapper,
+                                                                          voldemortConfig,
+                                                                          storageEngine,
+                                                                          storeRepository,
+                                                                          networkClassLoader);
+        }
     }
 
     public VAdminProto.AsyncOperationListResponse handleAsyncOperationList(VAdminProto.AsyncOperationListRequest request) {
@@ -708,7 +726,8 @@ public class AdminServiceRequestHandler implements RequestHandler {
         final String storeName = request.getStoreName();
         VAdminProto.SwapStoreResponse.Builder response = VAdminProto.SwapStoreResponse.newBuilder();
 
-        if(!metadataStore.getServerState().equals(MetadataStore.VoldemortState.NORMAL_SERVER)) {
+        if(!metadataStore.getServerStateUnlocked()
+                         .equals(MetadataStore.VoldemortState.NORMAL_SERVER)) {
             response.setError(ProtoUtils.encodeError(errorCodeMapper,
                                                      new VoldemortException("Voldemort server "
                                                                             + metadataStore.getNodeId()
@@ -1088,12 +1107,12 @@ public class AdminServiceRequestHandler implements RequestHandler {
                 ByteArray key = entry.getFirst();
                 Versioned<byte[]> value = entry.getSecond();
                 throttler.maybeThrottle(key.length() + valueSize(value));
-                if(StoreInstance.checkKeyBelongsToPartition(metadataStore.getNodeId(),
-                                                            key.get(),
-                                                            replicaToPartitionList,
-                                                            request.hasInitialCluster() ? new ClusterMapper().readCluster(new StringReader(request.getInitialCluster()))
-                                                                                       : metadataStore.getCluster(),
-                                                            metadataStore.getStoreDef(storeName))
+                if(StoreRoutingPlan.checkKeyBelongsToPartition(metadataStore.getNodeId(),
+                                                               key.get(),
+                                                               replicaToPartitionList,
+                                                               request.hasInitialCluster() ? new ClusterMapper().readCluster(new StringReader(request.getInitialCluster()))
+                                                                                          : metadataStore.getCluster(),
+                                                               metadataStore.getStoreDef(storeName))
                    && filter.accept(key, value)) {
                     if(storageEngine.delete(key, value.getVersion())) {
                         deleteSuccess++;
@@ -1190,7 +1209,8 @@ public class AdminServiceRequestHandler implements RequestHandler {
         VAdminProto.DeleteStoreResponse.Builder response = VAdminProto.DeleteStoreResponse.newBuilder();
 
         // don't try to delete a store in the middle of rebalancing
-        if(!metadataStore.getServerState().equals(MetadataStore.VoldemortState.NORMAL_SERVER)) {
+        if(!metadataStore.getServerStateUnlocked()
+                         .equals(MetadataStore.VoldemortState.NORMAL_SERVER)) {
             response.setError(ProtoUtils.encodeError(errorCodeMapper,
                                                      new VoldemortException("Voldemort server is not in normal state")));
             return response.build();
@@ -1267,7 +1287,8 @@ public class AdminServiceRequestHandler implements RequestHandler {
         VAdminProto.AddStoreResponse.Builder response = VAdminProto.AddStoreResponse.newBuilder();
 
         // don't try to add a store when not in normal state
-        if(!metadataStore.getServerState().equals(MetadataStore.VoldemortState.NORMAL_SERVER)) {
+        if(!metadataStore.getServerStateUnlocked()
+                         .equals(MetadataStore.VoldemortState.NORMAL_SERVER)) {
             response.setError(ProtoUtils.encodeError(errorCodeMapper,
                                                      new VoldemortException("Voldemort server is not in normal state")));
             return response.build();

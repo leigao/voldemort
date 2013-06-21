@@ -16,29 +16,38 @@
 
 package voldemort.utils;
 
+import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertTrue;
+
 import java.util.ArrayList;
 import java.util.List;
 
-import junit.framework.TestCase;
+import org.junit.Test;
+
+import voldemort.ClusterTestUtils;
 import voldemort.ServerTestUtils;
+import voldemort.VoldemortException;
 import voldemort.cluster.Cluster;
 import voldemort.cluster.Node;
 
 import com.google.common.collect.Lists;
 
-public class RebalanceUtilsTest extends TestCase {
+public class RebalanceUtilsTest {
 
+    @Test
     public void testUpdateCluster() {
         Cluster currentCluster = ServerTestUtils.getLocalCluster(2, new int[][] {
                 { 0, 1, 2, 3, 4, 5, 6, 7, 8 }, {} });
 
-        Cluster targetCluster = ServerTestUtils.getLocalCluster(2, new int[][] {
+        Cluster finalCluster = ServerTestUtils.getLocalCluster(2, new int[][] {
                 { 0, 1, 4, 5, 6, 7, 8 }, { 2, 3 } });
         Cluster updatedCluster = RebalanceUtils.updateCluster(currentCluster,
-                                                              new ArrayList<Node>(targetCluster.getNodes()));
-        assertEquals("updated cluster should match targetCluster", updatedCluster, targetCluster);
+                                                              new ArrayList<Node>(finalCluster.getNodes()));
+        assertEquals("updated cluster should match finalCluster", updatedCluster, finalCluster);
     }
 
+    @Test
     public void testGetNodeIds() {
         List<Node> nodes = Lists.newArrayList();
 
@@ -51,6 +60,7 @@ public class RebalanceUtilsTest extends TestCase {
         assertEquals(NodeUtils.getNodeIds(nodes).get(0).intValue(), 0);
     }
 
+    @Test
     public void testGetClusterWithNewNodes() {
         Cluster cluster = ServerTestUtils.getLocalCluster(2, 10, 1);
 
@@ -76,155 +86,130 @@ public class RebalanceUtilsTest extends TestCase {
                                        cluster.getNodeById(1).getPartitionIds()), true);
         assertEquals(generatedCluster.getNodeById(2).getPartitionIds().size(), 0);
         assertEquals(generatedCluster.getNodeById(3).getPartitionIds().size(), 0);
-
     }
 
-    public void testRemoveItemsToSplitListEvenly() {
-        // input of size 5
-        List<Integer> input = new ArrayList<Integer>();
-        System.out.println("Input of size 5");
-        for(int i = 0; i < 5; ++i) {
-            input.add(i);
+    private void doClusterTransformationBase(Cluster currentC,
+                                             Cluster interimC,
+                                             Cluster finalC,
+                                             boolean verify) {
+        Cluster derivedInterim1 = RebalanceUtils.getClusterWithNewNodes(currentC, interimC);
+        if(verify)
+            assertEquals(interimC, derivedInterim1);
+
+        Cluster derivedInterim2 = RebalanceUtils.getInterimCluster(currentC, finalC);
+        if(verify)
+            assertEquals(interimC, derivedInterim2);
+
+        RebalanceUtils.validateCurrentFinalCluster(currentC, finalC);
+        RebalanceUtils.validateCurrentInterimCluster(currentC, interimC);
+        RebalanceUtils.validateInterimFinalCluster(interimC, finalC);
+    }
+
+    private void doClusterTransformation(Cluster currentC, Cluster interimC, Cluster finalC) {
+        doClusterTransformationBase(currentC, interimC, finalC, false);
+    }
+
+    public void doClusterTransformationAndVerification(Cluster currentC,
+                                                       Cluster interimC,
+                                                       Cluster finalC) {
+        doClusterTransformationBase(currentC, interimC, finalC, true);
+    }
+
+    @Test
+    public void testClusterTransformationAndVerification() {
+        // Two-zone cluster: no-op
+        doClusterTransformationAndVerification(ClusterTestUtils.getZZCluster(),
+                                               ClusterTestUtils.getZZCluster(),
+                                               ClusterTestUtils.getZZCluster());
+
+        // Two-zone cluster: rebalance
+        doClusterTransformationAndVerification(ClusterTestUtils.getZZCluster(),
+                                               ClusterTestUtils.getZZCluster(),
+                                               ClusterTestUtils.getZZClusterWithSwappedPartitions());
+
+        // Two-zone cluster: cluster expansion
+        doClusterTransformationAndVerification(ClusterTestUtils.getZZCluster(),
+                                               ClusterTestUtils.getZZClusterWithNN(),
+                                               ClusterTestUtils.getZZClusterWithPP());
+
+        // Three-zone cluster: no-op
+        doClusterTransformationAndVerification(ClusterTestUtils.getZZZCluster(),
+                                               ClusterTestUtils.getZZZCluster(),
+                                               ClusterTestUtils.getZZZCluster());
+
+        // Three-zone cluster: rebalance
+        doClusterTransformationAndVerification(ClusterTestUtils.getZZZCluster(),
+                                               ClusterTestUtils.getZZZCluster(),
+                                               ClusterTestUtils.getZZZClusterWithSwappedPartitions());
+
+        // Three-zone cluster: cluster expansion
+        doClusterTransformationAndVerification(ClusterTestUtils.getZZZCluster(),
+                                               ClusterTestUtils.getZZZClusterWithNNN(),
+                                               ClusterTestUtils.getZZZClusterWithPPP());
+
+        doClusterTransformationAndVerification(ClusterTestUtils.getZZCluster(),
+                                               ClusterTestUtils.getZZECluster(),
+                                               ClusterTestUtils.getZZEClusterXXP());
+    }
+
+    @Test
+    public void testClusterTransformationAndVerificationExceptions() {
+        boolean excepted;
+
+        // Two-zone cluster: rebalance with extra partitions in interim cluster
+        excepted = false;
+        try {
+            doClusterTransformation(ClusterTestUtils.getZZCluster(),
+                                    ClusterTestUtils.getZZClusterWithExtraPartitions(),
+                                    ClusterTestUtils.getZZClusterWithSwappedPartitions());
+        } catch(VoldemortException ve) {
+            excepted = true;
         }
+        assertTrue(excepted);
 
-        List<Integer> output = RebalanceClusterUtils.removeItemsToSplitListEvenly(input, 1);
-        assertEquals(output.size(), 2);
-        assertEquals(output.get(0), new Integer(1));
-        assertEquals(output.get(1), new Integer(3));
-        System.out.println("1 : " + output);
-
-        output = RebalanceClusterUtils.removeItemsToSplitListEvenly(input, 2);
-        assertEquals(output.size(), 1);
-        assertEquals(output.get(0), new Integer(2));
-        System.out.println("2 : " + output);
-
-        output = RebalanceClusterUtils.removeItemsToSplitListEvenly(input, 3);
-        assertEquals(output.size(), 1);
-        assertEquals(output.get(0), new Integer(2));
-        System.out.println("3 : " + output);
-
-        output = RebalanceClusterUtils.removeItemsToSplitListEvenly(input, 4);
-        assertEquals(output.size(), 1);
-        assertEquals(output.get(0), new Integer(2));
-        System.out.println("4 : " + output);
-
-        output = RebalanceClusterUtils.removeItemsToSplitListEvenly(input, 5);
-        assertEquals(output.size(), 0);
-        System.out.println("5 : " + output);
-
-        // input of size 10
-        input.clear();
-        System.out.println("Input of size 10");
-        for(int i = 0; i < 10; ++i) {
-            input.add(i);
+        // Two-zone cluster: rebalance with extra partitions in final
+        excepted = false;
+        try {
+            doClusterTransformation(ClusterTestUtils.getZZCluster(),
+                                    ClusterTestUtils.getZZCluster(),
+                                    ClusterTestUtils.getZZClusterWithExtraPartitions());
+        } catch(VoldemortException ve) {
+            excepted = true;
         }
+        assertTrue(excepted);
 
-        output = RebalanceClusterUtils.removeItemsToSplitListEvenly(input, 1);
-        assertEquals(output.size(), 5);
-        assertEquals(output.get(0), new Integer(1));
-        assertEquals(output.get(4), new Integer(9));
-        System.out.println("1 : " + output);
-
-        output = RebalanceClusterUtils.removeItemsToSplitListEvenly(input, 2);
-        assertEquals(output.size(), 3);
-        assertEquals(output.get(0), new Integer(2));
-        assertEquals(output.get(2), new Integer(8));
-        System.out.println("2 : " + output);
-
-        output = RebalanceClusterUtils.removeItemsToSplitListEvenly(input, 3);
-        assertEquals(output.size(), 2);
-        assertEquals(output.get(0), new Integer(3));
-        assertEquals(output.get(1), new Integer(7));
-        System.out.println("3 : " + output);
-
-        output = RebalanceClusterUtils.removeItemsToSplitListEvenly(input, 4);
-        assertEquals(output.size(), 2);
-        assertEquals(output.get(0), new Integer(3));
-        assertEquals(output.get(1), new Integer(7));
-        System.out.println("4 : " + output);
-
-        output = RebalanceClusterUtils.removeItemsToSplitListEvenly(input, 5);
-        assertEquals(output.size(), 1);
-        assertEquals(output.get(0), new Integer(5));
-        System.out.println("5 : " + output);
-
-        output = RebalanceClusterUtils.removeItemsToSplitListEvenly(input, 6);
-        assertEquals(output.size(), 1);
-        assertEquals(output.get(0), new Integer(5));
-        System.out.println("6 : " + output);
-
-        // input of size 20
-        input.clear();
-        System.out.println("Input of size 20");
-        for(int i = 0; i < 20; ++i) {
-            input.add(i);
+        // Two-zone cluster: node ids swapped in interim cluster
+        excepted = false;
+        try {
+            doClusterTransformation(ClusterTestUtils.getZZCluster(),
+                                    ClusterTestUtils.getZZClusterWithNNWithSwappedNodeIds(),
+                                    ClusterTestUtils.getZZClusterWithPP());
+        } catch(VoldemortException ve) {
+            excepted = true;
         }
+        assertTrue(excepted);
 
-        output = RebalanceClusterUtils.removeItemsToSplitListEvenly(input, 1);
-        assertEquals(output.size(), 10);
-        assertEquals(output.get(0), new Integer(1));
-        assertEquals(output.get(9), new Integer(19));
-        System.out.println("1 : " + output);
+        // Two-zone cluster: node ids swapped in final is OK because this is the
+        // same as partitions being migrated among nodes.
+        excepted = false;
+        try {
+            doClusterTransformation(ClusterTestUtils.getZZCluster(),
+                                    ClusterTestUtils.getZZClusterWithNN(),
+                                    ClusterTestUtils.getZZClusterWithPPWithSwappedNodeIds());
+        } catch(VoldemortException ve) {
+            excepted = true;
+        }
+        assertFalse(excepted);
 
-        output = RebalanceClusterUtils.removeItemsToSplitListEvenly(input, 2);
-        assertEquals(output.size(), 6);
-        assertEquals(output.get(0), new Integer(2));
-        assertEquals(output.get(5), new Integer(17));
-        System.out.println("2 : " + output);
-
-        output = RebalanceClusterUtils.removeItemsToSplitListEvenly(input, 3);
-        assertEquals(output.size(), 5);
-        assertEquals(output.get(0), new Integer(3));
-        assertEquals(output.get(4), new Integer(17));
-        System.out.println("3 : " + output);
-
-        output = RebalanceClusterUtils.removeItemsToSplitListEvenly(input, 4);
-        assertEquals(output.size(), 4);
-        assertEquals(output.get(0), new Integer(4));
-        assertEquals(output.get(3), new Integer(16));
-        System.out.println("4 : " + output);
-
-        output = RebalanceClusterUtils.removeItemsToSplitListEvenly(input, 5);
-        assertEquals(output.size(), 3);
-        assertEquals(output.get(0), new Integer(5));
-        assertEquals(output.get(2), new Integer(15));
-        System.out.println("5 : " + output);
-
-        output = RebalanceClusterUtils.removeItemsToSplitListEvenly(input, 6);
-        assertEquals(output.size(), 2);
-        assertEquals(output.get(0), new Integer(6));
-        assertEquals(output.get(1), new Integer(13));
-        System.out.println("6 : " + output);
-
-        output = RebalanceClusterUtils.removeItemsToSplitListEvenly(input, 7);
-        assertEquals(output.size(), 2);
-        assertEquals(output.get(0), new Integer(6));
-        assertEquals(output.get(1), new Integer(13));
-        System.out.println("7 : " + output);
-
-        output = RebalanceClusterUtils.removeItemsToSplitListEvenly(input, 9);
-        assertEquals(output.size(), 2);
-        assertEquals(output.get(0), new Integer(6));
-        assertEquals(output.get(1), new Integer(13));
-        System.out.println("9 : " + output);
-
-        output = RebalanceClusterUtils.removeItemsToSplitListEvenly(input, 10);
-        assertEquals(output.size(), 1);
-        assertEquals(output.get(0), new Integer(10));
-        System.out.println("10 : " + output);
-
-        output = RebalanceClusterUtils.removeItemsToSplitListEvenly(input, 11);
-        assertEquals(output.size(), 1);
-        assertEquals(output.get(0), new Integer(10));
-        System.out.println("11 : " + output);
-
-        output = RebalanceClusterUtils.removeItemsToSplitListEvenly(input, 19);
-        assertEquals(output.size(), 1);
-        assertEquals(output.get(0), new Integer(10));
-        System.out.println("19 : " + output);
-
-        output = RebalanceClusterUtils.removeItemsToSplitListEvenly(input, 20);
-        assertEquals(output.size(), 0);
-        System.out.println("20 : " + output);
+        // Two-zone cluster: too many node ids in final
+        excepted = false;
+        try {
+            doClusterTransformation(ClusterTestUtils.getZZCluster(),
+                                    ClusterTestUtils.getZZClusterWithNN(),
+                                    ClusterTestUtils.getZZClusterWithPPWithTooManyNodes());
+        } catch(VoldemortException ve) {
+            excepted = true;
+        }
+        assertTrue(excepted);
     }
 }

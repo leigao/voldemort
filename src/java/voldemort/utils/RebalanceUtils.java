@@ -42,20 +42,23 @@ import voldemort.VoldemortException;
 import voldemort.client.ClientConfig;
 import voldemort.client.protocol.admin.AdminClient;
 import voldemort.client.protocol.admin.AdminClientConfig;
-import voldemort.client.rebalance.RebalanceClusterPlan;
-import voldemort.client.rebalance.RebalanceNodePlan;
 import voldemort.client.rebalance.RebalancePartitionsInfo;
+import voldemort.client.rebalance.RebalancePlan;
 import voldemort.cluster.Cluster;
 import voldemort.cluster.Node;
+import voldemort.cluster.Zone;
 import voldemort.routing.RoutingStrategy;
 import voldemort.routing.RoutingStrategyFactory;
+import voldemort.routing.StoreRoutingPlan;
 import voldemort.server.VoldemortConfig;
 import voldemort.server.rebalance.VoldemortRebalancingException;
 import voldemort.store.StoreDefinition;
+import voldemort.store.StoreUtils;
 import voldemort.store.bdb.BdbStorageConfiguration;
 import voldemort.store.metadata.MetadataStore.VoldemortState;
 import voldemort.store.readonly.ReadOnlyStorageConfiguration;
 import voldemort.store.readonly.ReadOnlyStorageFormat;
+import voldemort.tools.PartitionBalance;
 import voldemort.versioning.Occurred;
 import voldemort.versioning.VectorClock;
 import voldemort.versioning.Versioned;
@@ -76,7 +79,7 @@ public class RebalanceUtils {
     public final static List<String> canRebalanceList = Arrays.asList(BdbStorageConfiguration.TYPE_NAME,
                                                                       ReadOnlyStorageConfiguration.TYPE_NAME);
 
-    public final static String initialClusterFileName = "initial-cluster.xml";
+    public final static String currentClusterFileName = "current-cluster.xml";
     public final static String finalClusterFileName = "final-cluster.xml";
 
     /**
@@ -120,6 +123,10 @@ public class RebalanceUtils {
 
     }
 
+    // TODO: (refactor) Either move all methods that take an AdminClient
+    // somewhere else. Either (i) into a name space of AdminClient or (ii)
+    // separate utils class. Must wait until after all changes for abortable
+    // rebalance & atomic update of cluster/stores are merged to do this change.
     /**
      * Get the latest cluster from all available nodes in the cluster<br>
      * 
@@ -136,24 +143,15 @@ public class RebalanceUtils {
     public static Versioned<Cluster> getLatestCluster(List<Integer> requiredNodes,
                                                       AdminClient adminClient) {
         Versioned<Cluster> latestCluster = new Versioned<Cluster>(adminClient.getAdminClientCluster());
-        ArrayList<Versioned<Cluster>> clusterList = new ArrayList<Versioned<Cluster>>();
-
-        clusterList.add(latestCluster);
-        for(Node node: adminClient.getAdminClientCluster().getNodes()) {
+        Cluster cluster = latestCluster.getValue();
+        for(Node node: cluster.getNodes()) {
             try {
-                Versioned<Cluster> versionedCluster = adminClient.metadataMgmtOps.getRemoteCluster(node.getId());
-                VectorClock newClock = (VectorClock) versionedCluster.getVersion();
-                if(null != newClock && !clusterList.contains(versionedCluster)) {
-                    // check no two clocks are concurrent.
-                    checkNotConcurrent(clusterList, newClock);
-
-                    // add to clock list
-                    clusterList.add(versionedCluster);
-
-                    // update latestClock
-                    Occurred occurred = newClock.compare(latestCluster.getVersion());
-                    if(Occurred.AFTER.equals(occurred))
-                        latestCluster = versionedCluster;
+                Cluster nodesCluster = adminClient.metadataMgmtOps.getRemoteCluster(node.getId())
+                                                                  .getValue();
+                if(!nodesCluster.equals(cluster)) {
+                    throw new VoldemortException("Cluster is in inconsistent state because cluster xml on node "
+                                                 + node.getId()
+                                                 + " does not match cluster xml of adminClient.");
                 }
             } catch(Exception e) {
                 if(null != requiredNodes && requiredNodes.contains(node.getId()))
@@ -162,7 +160,6 @@ public class RebalanceUtils {
                     logger.info("Failed on node " + node.getId(), e);
             }
         }
-
         return latestCluster;
     }
 
@@ -175,47 +172,6 @@ public class RebalanceUtils {
                                              + clock + " and on current node " + newClock);
 
         }
-    }
-
-    /**
-     * Return the number of cross zone copying that is going to take place
-     * 
-     * @param targetCluster Target cluster metadata
-     * @param plan The rebalance plan
-     * @return Number of cross zone moves
-     */
-    public static int getCrossZoneMoves(final Cluster targetCluster, final RebalanceClusterPlan plan) {
-
-        int crossZoneMoves = 0;
-        for(RebalanceNodePlan nodePlan: plan.getRebalancingTaskQueue()) {
-            List<RebalancePartitionsInfo> infos = nodePlan.getRebalanceTaskList();
-            for(RebalancePartitionsInfo info: infos) {
-                Node donorNode = targetCluster.getNodeById(info.getDonorId());
-                Node stealerNode = targetCluster.getNodeById(info.getStealerId());
-
-                if(donorNode.getZoneId() != stealerNode.getZoneId()) {
-                    crossZoneMoves++;
-                }
-            }
-        }
-
-        return crossZoneMoves;
-    }
-
-    /**
-     * Return the number of total moves
-     * 
-     * @param plan The rebalance plan
-     * @return Number of moves
-     */
-    public static int getTotalMoves(final RebalanceClusterPlan plan) {
-
-        int totalMoves = 0;
-        for(RebalanceNodePlan nodePlan: plan.getRebalancingTaskQueue()) {
-            totalMoves += nodePlan.getRebalanceTaskList().size();
-        }
-
-        return totalMoves;
     }
 
     /**
@@ -249,7 +205,8 @@ public class RebalanceUtils {
      * @param adminClient Admin client used to query
      * @throws VoldemortRebalancingException if any node is not in normal state
      */
-    public static void validateClusterState(final Cluster cluster, final AdminClient adminClient) {
+    public static void checkEachServerInNormalState(final Cluster cluster,
+                                                    final AdminClient adminClient) {
         for(Node node: cluster.getNodes()) {
             Versioned<VoldemortState> versioned = adminClient.rebalanceOps.getRemoteServerState(node.getId());
 
@@ -268,22 +225,227 @@ public class RebalanceUtils {
     }
 
     /**
-     * Given the current cluster and a target cluster, generates a cluster with
-     * new nodes ( which in turn contain empty partition lists )
+     * Verify store definitions are congruent with cluster definition.
+     * 
+     * @param cluster
+     * @param stores
+     */
+    public static void validateClusterStores(final Cluster cluster,
+                                             final List<StoreDefinition> storeDefs) {
+        // Constructing a StoreRoutingPlan has the (desirable in this
+        // case) side-effect of verifying that the store definition is congruent
+        // with the cluster definition. If there are issues, exceptions are
+        // thrown.
+        for(StoreDefinition storeDefinition: storeDefs) {
+            new StoreRoutingPlan(cluster, storeDefinition);
+        }
+        return;
+    }
+
+    // TODO: This method is biased towards the 3 currently supported use cases:
+    // shuffle, cluster expansion, and zone expansion. There are two other use
+    // cases we need to consider: cluster contraction (reducing # nodes in a
+    // zone) and zone contraction (reducing # of zones). We probably want to end
+    // up pass an enum into this method so we can do proper checks based on use
+    // case.
+    /**
+     * A final cluster ought to be a super set of current cluster. I.e.,
+     * existing node IDs ought to map to same server, but partition layout can
+     * have changed and there may exist new nodes.
+     * 
+     * @param currentCluster
+     * @param finalCluster
+     */
+    public static void validateCurrentFinalCluster(final Cluster currentCluster,
+                                                   final Cluster finalCluster) {
+        validateClusterPartitionCounts(currentCluster, finalCluster);
+        validateClusterNodeState(currentCluster, finalCluster);
+
+        return;
+    }
+
+    /**
+     * An interim cluster ought to be a super set of current cluster. I.e., it
+     * ought to either be the same as current cluster (every partition is mapped
+     * to the same node of current & interim), or it ought to have more nodes
+     * (possibly in new zones) without partitions.
+     * 
+     * @param currentCluster
+     * @param interimCluster
+     */
+    public static void validateCurrentInterimCluster(final Cluster currentCluster,
+                                                     final Cluster interimCluster) {
+        validateClusterPartitionCounts(currentCluster, interimCluster);
+        validateClusterNodeState(currentCluster, interimCluster);
+        validateClusterPartitionState(currentCluster, interimCluster);
+
+        return;
+    }
+
+    /**
+     * Interim and final clusters ought to have same partition counts, same
+     * zones, and same node state. Partitions per node may of course differ.
+     * 
+     * @param interimCluster
+     * @param finalCluster
+     */
+    public static void validateInterimFinalCluster(final Cluster interimCluster,
+                                                   final Cluster finalCluster) {
+        validateClusterPartitionCounts(interimCluster, finalCluster);
+        validateClusterZonesSame(interimCluster, finalCluster);
+        validateClusterNodeCounts(interimCluster, finalCluster);
+        validateClusterNodeState(interimCluster, finalCluster);
+        return;
+    }
+
+    /**
+     * Confirms that both clusters have the same number of total partitions.
+     * 
+     * @param lhs
+     * @param rhs
+     */
+    public static void validateClusterPartitionCounts(final Cluster lhs, final Cluster rhs) {
+        if(lhs.getNumberOfPartitions() != rhs.getNumberOfPartitions())
+            throw new VoldemortException("Total number of partitions should be equal [ lhs cluster ("
+                                         + lhs.getNumberOfPartitions()
+                                         + ") not equal to rhs cluster ("
+                                         + rhs.getNumberOfPartitions() + ") ]");
+    }
+
+    /**
+     * Confirm that all nodes shared between clusters host exact same partition
+     * IDs and that nodes only in the super set cluster have no partition IDs.
+     * 
+     * @param subsetCluster
+     * @param supersetCluster
+     */
+    public static void validateClusterPartitionState(final Cluster subsetCluster,
+                                                     final Cluster supersetCluster) {
+        if(!supersetCluster.getNodeIds().containsAll(subsetCluster.getNodeIds())) {
+            throw new VoldemortException("Superset cluster does not contain all nodes from subset cluster[ subset cluster node ids ("
+                                         + subsetCluster.getNodeIds()
+                                         + ") are not a subset of superset cluster node ids ("
+                                         + supersetCluster.getNodeIds() + ") ]");
+
+        }
+        for(int nodeId: subsetCluster.getNodeIds()) {
+            Node supersetNode = supersetCluster.getNodeById(nodeId);
+            Node subsetNode = subsetCluster.getNodeById(nodeId);
+            if(!supersetNode.getPartitionIds().equals(subsetNode.getPartitionIds())) {
+                throw new VoldemortRebalancingException("Partition IDs do not match between clusters for nodes with id "
+                                                        + nodeId
+                                                        + " : subset cluster has "
+                                                        + subsetNode.getPartitionIds()
+                                                        + " and superset cluster has "
+                                                        + supersetNode.getPartitionIds());
+            }
+        }
+        Set<Integer> nodeIds = supersetCluster.getNodeIds();
+        nodeIds.removeAll(subsetCluster.getNodeIds());
+        for(int nodeId: nodeIds) {
+            Node supersetNode = supersetCluster.getNodeById(nodeId);
+            if(!supersetNode.getPartitionIds().isEmpty()) {
+                throw new VoldemortRebalancingException("New node "
+                                                        + nodeId
+                                                        + " in superset cluster already has partitions: "
+                                                        + supersetNode.getPartitionIds());
+            }
+        }
+    }
+
+    /**
+     * Confirms that both clusters have the same set of zones defined.
+     * 
+     * @param lhs
+     * @param rhs
+     */
+    public static void validateClusterZonesSame(final Cluster lhs, final Cluster rhs) {
+        Set<Zone> lhsSet = new HashSet<Zone>(lhs.getZones());
+        Set<Zone> rhsSet = new HashSet<Zone>(rhs.getZones());
+        if(!lhsSet.equals(rhsSet))
+            throw new VoldemortException("Zones are not the same [ lhs cluster zones ("
+                                         + lhs.getZones() + ") not equal to rhs cluster zones ("
+                                         + rhs.getZones() + ") ]");
+    }
+
+    /**
+     * Confirms that both clusters have the same number of nodes by comparing
+     * set of node Ids between clusters.
+     * 
+     * @param lhs
+     * @param rhs
+     */
+    public static void validateClusterNodeCounts(final Cluster lhs, final Cluster rhs) {
+        if(!lhs.getNodeIds().equals(rhs.getNodeIds())) {
+            throw new VoldemortException("Node ids are not the same [ lhs cluster node ids ("
+                                         + lhs.getNodeIds()
+                                         + ") not equal to rhs cluster node ids ("
+                                         + rhs.getNodeIds() + ") ]");
+        }
+    }
+
+    /**
+     * Confirms that any nodes from supersetCluster that are in subsetCluster
+     * have the same state (i.e., node id, host name, and ports). Specific
+     * partitions hosted are not compared.
+     * 
+     * @param subsetCluster
+     * @param supersetCluster
+     */
+    public static void validateClusterNodeState(final Cluster subsetCluster,
+                                                final Cluster supersetCluster) {
+        if(!supersetCluster.getNodeIds().containsAll(subsetCluster.getNodeIds())) {
+            throw new VoldemortException("Superset cluster does not contain all nodes from subset cluster[ subset cluster node ids ("
+                                         + subsetCluster.getNodeIds()
+                                         + ") are not a subset of superset cluster node ids ("
+                                         + supersetCluster.getNodeIds() + ") ]");
+
+        }
+        for(Node subsetNode: subsetCluster.getNodes()) {
+            Node supersetNode = supersetCluster.getNodeById(subsetNode.getId());
+            if(!subsetNode.isEqualState(supersetNode)) {
+                throw new VoldemortException("Nodes do not have same state[ subset node state ("
+                                             + subsetNode.getStateString()
+                                             + ") not equal to superset node state ("
+                                             + supersetNode.getStateString() + ") ]");
+            }
+        }
+    }
+
+    /**
+     * Given the current cluster and final cluster, generates an interim cluster
+     * with empty new nodes (and zones).
      * 
      * @param currentCluster Current cluster metadata
-     * @param targetCluster Target cluster metadata
+     * @param finalCluster Final cluster metadata
+     * @return Returns a new interim cluster which contains nodes and zones of
+     *         final cluster, but with empty partition lists if they were not
+     *         present in current cluster.
+     */
+    public static Cluster getInterimCluster(Cluster currentCluster, Cluster finalCluster) {
+        List<Node> newNodeList = new ArrayList<Node>(currentCluster.getNodes());
+        for(Node node: finalCluster.getNodes()) {
+            if(!ClusterUtils.containsNode(currentCluster, node.getId())) {
+                newNodeList.add(NodeUtils.updateNode(node, new ArrayList<Integer>()));
+            }
+        }
+        Collections.sort(newNodeList);
+        return new Cluster(currentCluster.getName(),
+                           newNodeList,
+                           Lists.newArrayList(finalCluster.getZones()));
+    }
+
+    /**
+     * Given the current cluster and an interim cluster, generates a cluster
+     * with new nodes (which in turn contain empty partition lists).
+     * 
+     * @param currentCluster Current cluster metadata
+     * @param interimCluster Interim cluster metadata
      * @return Returns a new cluster which contains nodes of the current cluster
      *         + new nodes
      */
-    public static Cluster getClusterWithNewNodes(Cluster currentCluster, Cluster targetCluster) {
-        ArrayList<Node> newNodes = new ArrayList<Node>();
-        for(Node node: targetCluster.getNodes()) {
-            if(!ClusterUtils.containsNode(currentCluster, node.getId())) {
-                newNodes.add(NodeUtils.updateNode(node, new ArrayList<Integer>()));
-            }
-        }
-        return updateCluster(currentCluster, newNodes);
+    public static Cluster getClusterWithNewNodes(Cluster currentCluster, Cluster interimCluster) {
+        return getInterimCluster(currentCluster, interimCluster);
     }
 
     /**
@@ -332,7 +494,7 @@ public class RebalanceUtils {
         for(int donatedPartition: donatedPartitions) {
 
             // Gets the donor Node that owns this donated partition
-            Node donorNode = ClusterUtils.getNodeByPartitionId(updatedCluster, donatedPartition);
+            Node donorNode = updatedCluster.getNodeForPartitionId(donatedPartition);
             Node stealerNode = updatedCluster.getNodeById(stealerNodeId);
 
             if(donorNode == stealerNode) {
@@ -354,133 +516,62 @@ public class RebalanceUtils {
     }
 
     /**
-     * Attempt to propagate a cluster definition to all nodes. Also rollback is
-     * in place in case one of them fails
-     * 
-     * @param adminClient {@link voldemort.client.protocol.admin.AdminClient}
-     *        instance to use.
-     * @param cluster Cluster definition to propagate
-     */
-    public static void propagateCluster(AdminClient adminClient, Cluster cluster) {
-
-        // Contains a mapping of node id to the existing cluster definition
-        HashMap<Integer, Cluster> currentClusters = Maps.newHashMap();
-
-        Versioned<Cluster> latestCluster = new Versioned<Cluster>(cluster);
-        ArrayList<Versioned<Cluster>> clusterList = new ArrayList<Versioned<Cluster>>();
-        clusterList.add(latestCluster);
-
-        for(Node node: cluster.getNodes()) {
-            try {
-                Versioned<Cluster> versionedCluster = adminClient.metadataMgmtOps.getRemoteCluster(node.getId());
-                VectorClock newClock = (VectorClock) versionedCluster.getVersion();
-
-                // Update the current cluster information
-                currentClusters.put(node.getId(), versionedCluster.getValue());
-
-                if(null != newClock && !clusterList.contains(versionedCluster)) {
-                    // check no two clocks are concurrent.
-                    checkNotConcurrent(clusterList, newClock);
-
-                    // add to clock list
-                    clusterList.add(versionedCluster);
-
-                    // update latestClock
-                    Occurred occurred = newClock.compare(latestCluster.getVersion());
-                    if(Occurred.AFTER.equals(occurred))
-                        latestCluster = versionedCluster;
-                }
-
-            } catch(Exception e) {
-                throw new VoldemortException("Failed to get cluster version from node "
-                                             + node.getId(), e);
-            }
-        }
-
-        // Vector clock to propagate
-        VectorClock latestClock = ((VectorClock) latestCluster.getVersion()).incremented(0,
-                                                                                         System.currentTimeMillis());
-
-        // Alright, now try updating the values...
-        Set<Integer> completedNodeIds = Sets.newHashSet();
-        try {
-            for(Node node: cluster.getNodes()) {
-                logger.info("Updating cluster definition on remote node " + node);
-                adminClient.metadataMgmtOps.updateRemoteCluster(node.getId(), cluster, latestClock);
-                logger.info("Updated cluster definition " + cluster + " on remote node "
-                            + node.getId());
-                completedNodeIds.add(node.getId());
-            }
-        } catch(VoldemortException e) {
-            // Fail early...
-            for(Integer completedNodeId: completedNodeIds) {
-                try {
-                    adminClient.metadataMgmtOps.updateRemoteCluster(completedNodeId,
-                                                                    currentClusters.get(completedNodeId),
-                                                                    latestClock);
-                } catch(VoldemortException exception) {
-                    logger.error("Could not revert cluster metadata back on node "
-                                 + completedNodeId);
-                }
-            }
-            throw e;
-        }
-
-    }
-
-    /**
      * For a particular stealer node find all the "primary" <replica, partition>
      * tuples it will steal. In other words, expect the "replica" part to be 0
      * always.
      * 
      * @param currentCluster The cluster definition of the existing cluster
-     * @param targetCluster The target cluster definition
+     * @param finalCluster The final cluster definition
      * @param stealNodeId Node id of the stealer node
      * @return Returns a list of primary partitions which this stealer node will
      *         get
      */
     public static List<Integer> getStolenPrimaryPartitions(final Cluster currentCluster,
-                                                           final Cluster targetCluster,
+                                                           final Cluster finalCluster,
                                                            final int stealNodeId) {
-        List<Integer> targetList = new ArrayList<Integer>(targetCluster.getNodeById(stealNodeId)
-                                                                       .getPartitionIds());
+        List<Integer> finalList = new ArrayList<Integer>(finalCluster.getNodeById(stealNodeId)
+                                                                     .getPartitionIds());
 
         List<Integer> currentList = new ArrayList<Integer>();
-        if(ClusterUtils.containsNode(currentCluster, stealNodeId))
+        if(ClusterUtils.containsNode(currentCluster, stealNodeId)) {
             currentList = currentCluster.getNodeById(stealNodeId).getPartitionIds();
+        } else {
+            if(logger.isDebugEnabled()) {
+                logger.debug("Current cluster does not contain stealer node (cluster : [[["
+                             + currentCluster + "]]], node id " + stealNodeId + ")");
+            }
+        }
+        finalList.removeAll(currentList);
 
-        // remove all current partitions from targetList
-        targetList.removeAll(currentList);
-
-        return targetList;
+        return finalList;
     }
 
     /**
      * Find all [replica_type, partition] tuples to be stolen
      * 
      * @param currentCluster Current cluster metadata
-     * @param targetCluster Target cluster metadata
+     * @param finalCluster Final cluster metadata
      * @param storeDef Store Definition
      * @return Map of stealer node id to sets of [ replica_type, partition ]
      *         tuples
      */
     public static Map<Integer, Set<Pair<Integer, Integer>>> getStolenPartitionTuples(final Cluster currentCluster,
-                                                                                     final Cluster targetCluster,
+                                                                                     final Cluster finalCluster,
                                                                                      final StoreDefinition storeDef) {
         Map<Integer, Set<Pair<Integer, Integer>>> currentNodeIdToReplicas = getNodeIdToAllPartitions(currentCluster,
                                                                                                      storeDef,
                                                                                                      true);
-        Map<Integer, Set<Pair<Integer, Integer>>> targetNodeIdToReplicas = getNodeIdToAllPartitions(targetCluster,
-                                                                                                    storeDef,
-                                                                                                    true);
+        Map<Integer, Set<Pair<Integer, Integer>>> finalNodeIdToReplicas = getNodeIdToAllPartitions(finalCluster,
+                                                                                                   storeDef,
+                                                                                                   true);
 
         Map<Integer, Set<Pair<Integer, Integer>>> stealerNodeToStolenPartitionTuples = Maps.newHashMap();
-        for(int stealerId: NodeUtils.getNodeIds(Lists.newArrayList(targetCluster.getNodes()))) {
+        for(int stealerId: NodeUtils.getNodeIds(Lists.newArrayList(finalCluster.getNodes()))) {
             Set<Pair<Integer, Integer>> clusterStealerReplicas = currentNodeIdToReplicas.get(stealerId);
-            Set<Pair<Integer, Integer>> targetStealerReplicas = targetNodeIdToReplicas.get(stealerId);
+            Set<Pair<Integer, Integer>> finalStealerReplicas = finalNodeIdToReplicas.get(stealerId);
 
             Set<Pair<Integer, Integer>> diff = Utils.getAddedInTarget(clusterStealerReplicas,
-                                                                      targetStealerReplicas);
+                                                                      finalStealerReplicas);
 
             if(diff != null && diff.size() > 0) {
                 stealerNodeToStolenPartitionTuples.put(stealerId, diff);
@@ -536,6 +627,15 @@ public class RebalanceUtils {
             nodeIdToReplicas.put(node.getId(), new HashSet<Pair<Integer, Integer>>());
         }
 
+        // Track how many zones actually have partitions (and so replica types)
+        // in them.
+        int zonesWithPartitions = 0;
+        for(Integer zoneId: cluster.getZoneIds()) {
+            if(cluster.getNumberOfPartitionsInZone(zoneId) > 0) {
+                zonesWithPartitions++;
+            }
+        }
+
         // Loops through all nodes
         for(Node node: cluster.getNodes()) {
 
@@ -545,11 +645,21 @@ public class RebalanceUtils {
                 // Gets the list of replicating partitions.
                 List<Integer> replicaPartitionList = routingStrategy.getReplicatingPartitionList(primary);
 
-                if(replicaPartitionList.size() != storeDef.getReplicationFactor())
-                    throw new VoldemortException("Number of replicas returned ("
-                                                 + replicaPartitionList.size()
-                                                 + ") is less than the required replication factor ("
-                                                 + storeDef.getReplicationFactor() + ")");
+                if((replicaPartitionList.size() % zonesWithPartitions != 0)
+                   || ((replicaPartitionList.size() / zonesWithPartitions) != (storeDef.getReplicationFactor() / cluster.getNumberOfZones()))) {
+
+                    // For zone expansion & shrinking, this warning is expected
+                    // in some cases. For other use cases (shuffling, cluster
+                    // expansion), this warning indicates that something
+                    // is wrong between the clusters and store defs.
+                    logger.warn("Number of replicas returned (" + replicaPartitionList.size()
+                                + ") does not make sense given the replication factor ("
+                                + storeDef.getReplicationFactor() + ") and that there are "
+                                + cluster.getNumberOfZones() + " zones of which "
+                                + zonesWithPartitions + " have partitions (and of which "
+                                + (cluster.getNumberOfZones() - zonesWithPartitions)
+                                + " are empty).");
+                }
 
                 int replicaType = 0;
                 if(!includePrimary) {
@@ -574,12 +684,24 @@ public class RebalanceUtils {
     /**
      * Print log to the following logger ( Info level )
      * 
-     * @param taskId Task id
+     * @param batchId Task id
      * @param logger Logger class
      * @param message The message to print
      */
-    public static void printLog(int taskId, Logger logger, String message) {
-        logger.info("Task id [" + Integer.toString(taskId) + "] " + message);
+    public static void printBatchLog(int batchId, Logger logger, String message) {
+        logger.info("[Rebalance batch id " + batchId + "] " + message);
+    }
+
+    /**
+     * Print log to the following logger ( Info level )
+     * 
+     * @param batchId
+     * @param taskId
+     * @param logger
+     * @param message
+     */
+    public static void printBatchTaskLog(int batchId, int taskId, Logger logger, String message) {
+        logger.info("[Rebalance batch/task id " + batchId + "/" + taskId + "] " + message);
     }
 
     /**
@@ -621,7 +743,8 @@ public class RebalanceUtils {
      *        definitions
      * @return List of store definitions
      */
-    public static List<StoreDefinition> getStoreDefinition(Cluster cluster, AdminClient adminClient) {
+    public static List<StoreDefinition> getCurrentStoreDefinitions(Cluster cluster,
+                                                                   AdminClient adminClient) {
         List<StoreDefinition> storeDefs = null;
         for(Node node: cluster.getNodes()) {
             List<StoreDefinition> storeDefList = adminClient.metadataMgmtOps.getRemoteStoreDefList(node.getId())
@@ -753,47 +876,102 @@ public class RebalanceUtils {
     /**
      * Given the initial and final cluster dumps it into the output directory
      * 
-     * @param initialCluster Initial cluster metadata
+     * @param currentCluster Initial cluster metadata
      * @param finalCluster Final cluster metadata
      * @param outputDir Output directory where to dump this file
      * @param filePrefix String to prepend to the initial & final cluster
      *        metadata files
      * @throws IOException
      */
-    public static void dumpCluster(Cluster initialCluster,
-                                   Cluster finalCluster,
-                                   File outputDir,
-                                   String filePrefix) {
-
-        // Create the output directory if it doesn't exist
-        if(!outputDir.exists()) {
-            Utils.mkdirs(outputDir);
-        }
-
-        // Get the file paths
-        File initialClusterFile = new File(outputDir, filePrefix + initialClusterFileName);
-        File finalClusterFile = new File(outputDir, filePrefix + finalClusterFileName);
-
-        // Write the output
-        ClusterMapper mapper = new ClusterMapper();
-        try {
-            FileUtils.writeStringToFile(initialClusterFile, mapper.writeCluster(initialCluster));
-            FileUtils.writeStringToFile(finalClusterFile, mapper.writeCluster(finalCluster));
-        } catch(IOException e) {
-            logger.error("Error writing cluster metadata to file");
-        }
+    public static void dumpClusters(Cluster currentCluster,
+                                    Cluster finalCluster,
+                                    String outputDirName,
+                                    String filePrefix) {
+        dumpClusterToFile(outputDirName, filePrefix + currentClusterFileName, currentCluster);
+        dumpClusterToFile(outputDirName, filePrefix + finalClusterFileName, finalCluster);
     }
 
     /**
-     * Given the initial and final cluster dumps it into the output directory
+     * Given the current and final cluster dumps it into the output directory
      * 
-     * @param initialCluster Initial cluster metadata
+     * @param currentCluster Initial cluster metadata
      * @param finalCluster Final cluster metadata
      * @param outputDir Output directory where to dump this file
      * @throws IOException
      */
-    public static void dumpCluster(Cluster initialCluster, Cluster finalCluster, File outputDir) {
-        dumpCluster(initialCluster, finalCluster, outputDir, "");
+    public static void dumpClusters(Cluster currentCluster,
+                                    Cluster finalCluster,
+                                    String outputDirName) {
+        dumpClusters(currentCluster, finalCluster, outputDirName, "");
+    }
+
+    /**
+     * Prints a cluster xml to a file.
+     * 
+     * @param outputDirName
+     * @param fileName
+     * @param cluster
+     */
+    public static void dumpClusterToFile(String outputDirName, String fileName, Cluster cluster) {
+
+        if(outputDirName != null) {
+            File outputDir = new File(outputDirName);
+            if(!outputDir.exists()) {
+                Utils.mkdirs(outputDir);
+            }
+
+            try {
+                FileUtils.writeStringToFile(new File(outputDirName, fileName),
+                                            new ClusterMapper().writeCluster(cluster));
+            } catch(IOException e) {
+                logger.error("IOException during dumpClusterToFile: " + e);
+            }
+        }
+    }
+
+    /**
+     * Prints a balance analysis to a file.
+     * 
+     * @param outputDirName
+     * @param baseFileName suffix '.analysis' is appended to baseFileName.
+     * @param partitionBalance
+     */
+    public static void dumpAnalysisToFile(String outputDirName,
+                                          String baseFileName,
+                                          PartitionBalance partitionBalance) {
+        if(outputDirName != null) {
+            File outputDir = new File(outputDirName);
+            if(!outputDir.exists()) {
+                Utils.mkdirs(outputDir);
+            }
+
+            try {
+                FileUtils.writeStringToFile(new File(outputDirName, baseFileName + ".analysis"),
+                                            partitionBalance.toString());
+            } catch(IOException e) {
+                logger.error("IOException during dumpAnalysisToFile: " + e);
+            }
+        }
+    }
+
+    /**
+     * Prints the plan to a file.
+     * 
+     * @param outputDirName
+     * @param plan
+     */
+    public static void dumpPlanToFile(String outputDirName, RebalancePlan plan) {
+        if(outputDirName != null) {
+            File outputDir = new File(outputDirName);
+            if(!outputDir.exists()) {
+                Utils.mkdirs(outputDir);
+            }
+            try {
+                FileUtils.writeStringToFile(new File(outputDirName, "plan.out"), plan.toString());
+            } catch(IOException e) {
+                logger.error("IOException during dumpPlanToFile: " + e);
+            }
+        }
     }
 
     /**
@@ -817,6 +995,14 @@ public class RebalanceUtils {
         return flattenedTuples;
     }
 
+    public static int countPartitionStores(List<RebalancePartitionsInfo> infos) {
+        int count = 0;
+        for(RebalancePartitionsInfo info: infos) {
+            count += info.getPartitionStoreCount();
+        }
+        return count;
+    }
+
     /**
      * Given a map of replica_type to partition mapping gives back a set of
      * tuples of [replica_type, partition]
@@ -834,22 +1020,6 @@ public class RebalanceUtils {
         }
 
         return partitionTuples;
-    }
-
-    /**
-     * Given a list of node plans flattens it into a list of partitions info
-     * 
-     * @param rebalanceNodePlanList Complete list of rebalance node plan
-     * @return Flattened list of partition plans
-     */
-    public static List<RebalancePartitionsInfo> flattenNodePlans(List<RebalanceNodePlan> rebalanceNodePlanList) {
-        List<RebalancePartitionsInfo> list = new ArrayList<RebalancePartitionsInfo>();
-        for(RebalanceNodePlan rebalanceNodePlan: rebalanceNodePlanList) {
-            for(final RebalancePartitionsInfo stealInfo: rebalanceNodePlan.getRebalanceTaskList()) {
-                list.add(stealInfo);
-            }
-        }
-        return list;
     }
 
     /**
@@ -888,20 +1058,14 @@ public class RebalanceUtils {
 
             // Filter the plans only for stores given
             HashMap<String, HashMap<Integer, List<Integer>>> storeToReplicaToAddPartitions = info.getStoreToReplicaToAddPartitionList();
-            HashMap<String, HashMap<Integer, List<Integer>>> storeToReplicaToDeletePartitions = info.getStoreToReplicaToDeletePartitionList();
 
             HashMap<String, HashMap<Integer, List<Integer>>> newStoreToReplicaToAddPartitions = Maps.newHashMap();
-            HashMap<String, HashMap<Integer, List<Integer>>> newStoreToReplicaToDeletePartitions = Maps.newHashMap();
             for(String storeName: storeNames) {
                 if(storeToReplicaToAddPartitions.containsKey(storeName))
                     newStoreToReplicaToAddPartitions.put(storeName,
                                                          storeToReplicaToAddPartitions.get(storeName));
-                if(storeToReplicaToDeletePartitions.containsKey(storeName))
-                    newStoreToReplicaToDeletePartitions.put(storeName,
-                                                            storeToReplicaToDeletePartitions.get(storeName));
             }
             info.setStoreToReplicaToAddPartitionList(newStoreToReplicaToAddPartitions);
-            info.setStoreToReplicaToDeletePartitionList(newStoreToReplicaToDeletePartitions);
 
             plans.add(info);
         }
@@ -963,4 +1127,73 @@ public class RebalanceUtils {
             }
         });
     }
+
+    // TODO: (refactor) separate analysis from pretty printing and add a unit
+    // test for the analysis sub-method.
+    /**
+     * Compares current cluster with final cluster. Uses pertinent store defs
+     * for each cluster to determine if a node that hosts a zone-primary in the
+     * current cluster will no longer host any zone-nary in the final cluster.
+     * This check is the precondition for a server returning an invalid metadata
+     * exception to a client on a normal-case put or get. Normal-case being that
+     * the zone-primary receives the pseudo-master put or the get operation.
+     * 
+     * @param currentCluster
+     * @param currentStoreDefs
+     * @param finalCluster
+     * @param finalStoreDefs
+     * @return pretty-printed string documenting invalid metadata rates for each
+     *         zone.
+     */
+    public static String analyzeInvalidMetadataRate(final Cluster currentCluster,
+                                                    List<StoreDefinition> currentStoreDefs,
+                                                    final Cluster finalCluster,
+                                                    List<StoreDefinition> finalStoreDefs) {
+        StringBuilder sb = new StringBuilder();
+        sb.append("Dump of invalid metadata rates per zone").append(Utils.NEWLINE);
+
+        HashMap<StoreDefinition, Integer> uniqueStores = KeyDistributionGenerator.getUniqueStoreDefinitionsWithCounts(currentStoreDefs);
+
+        for(StoreDefinition currentStoreDef: uniqueStores.keySet()) {
+            sb.append("Store exemplar: " + currentStoreDef.getName())
+              .append(Utils.NEWLINE)
+              .append("\tThere are " + uniqueStores.get(currentStoreDef) + " other similar stores.")
+              .append(Utils.NEWLINE);
+
+            StoreRoutingPlan currentSRP = new StoreRoutingPlan(currentCluster, currentStoreDef);
+            StoreDefinition finalStoreDef = StoreUtils.getStoreDef(finalStoreDefs,
+                                                                   currentStoreDef.getName());
+            StoreRoutingPlan finalSRP = new StoreRoutingPlan(finalCluster, finalStoreDef);
+
+            // Only care about existing zones
+            for(int zoneId: currentCluster.getZoneIds()) {
+                int zonePrimariesCount = 0;
+                int invalidMetadata = 0;
+
+                // Examine nodes in current cluster in existing zone.
+                for(int nodeId: currentCluster.getNodeIdsInZone(zoneId)) {
+                    // For every zone-primary in current cluster
+                    for(int zonePrimaryPartitionId: currentSRP.getZonePrimaryPartitionIds(nodeId)) {
+                        zonePrimariesCount++;
+                        // Determine if original zone-primary node is still some
+                        // form of n-ary in final cluster. If not,
+                        // InvalidMetadataException will fire.
+                        if(!finalSRP.getZoneNAryPartitionIds(nodeId)
+                                    .contains(zonePrimaryPartitionId)) {
+                            invalidMetadata++;
+                        }
+                    }
+                }
+                float rate = invalidMetadata / (float) zonePrimariesCount;
+                sb.append("\tZone " + zoneId)
+                  .append(" : total zone primaries " + zonePrimariesCount)
+                  .append(", # that trigger invalid metadata " + invalidMetadata)
+                  .append(" => " + rate)
+                  .append(Utils.NEWLINE);
+            }
+        }
+
+        return sb.toString();
+    }
+
 }

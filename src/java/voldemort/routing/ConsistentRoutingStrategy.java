@@ -1,5 +1,5 @@
 /*
- * Copyright 2008-2009 LinkedIn, Inc
+ * Copyright 2008-2013 LinkedIn, Inc
  * 
  * Licensed under the Apache License, Version 2.0 (the "License"); you may not
  * use this file except in compliance with the License. You may obtain a copy of
@@ -59,6 +59,7 @@ public class ConsistentRoutingStrategy implements RoutingStrategy {
         this(new FnvHashFunction(), nodes, numReplicas);
     }
 
+    @Override
     public int getNumReplicas() {
         return this.numReplicas;
     }
@@ -102,6 +103,7 @@ public class ConsistentRoutingStrategy implements RoutingStrategy {
         return Integer.MAX_VALUE;
     }
 
+    @Override
     public List<Node> routeRequest(byte[] key) {
         List<Integer> partitionList = getPartitionList(key);
 
@@ -113,16 +115,17 @@ public class ConsistentRoutingStrategy implements RoutingStrategy {
             preferenceList.add(partitionToNode[partition]);
         }
         if(logger.isDebugEnabled()) {
-            StringBuilder nodeList = new StringBuilder();
+            List<Integer> nodeIdList = new ArrayList<Integer>();
             for(int partition: partitionList) {
-                nodeList.append(partitionToNode[partition].getId() + ",");
+                nodeIdList.add(partitionToNode[partition].getId());
             }
-            logger.debug("Key " + ByteUtils.toHexString(key) + " mapped to Nodes [" + nodeList
-                         + "] Partitions [" + partitionList + "]");
+            logger.debug("Key " + ByteUtils.toHexString(key) + " mapped to Nodes " + nodeIdList
+                         + " Partitions " + partitionList);
         }
         return preferenceList;
     }
 
+    @Override
     public List<Integer> getReplicatingPartitionList(int index) {
         List<Node> preferenceList = new ArrayList<Node>(numReplicas);
         List<Integer> replicationPartitionsList = new ArrayList<Integer>(numReplicas);
@@ -156,10 +159,12 @@ public class ConsistentRoutingStrategy implements RoutingStrategy {
      * @param key
      * @return
      */
+    @Override
     public Integer getMasterPartition(byte[] key) {
         return abs(hash.hash(key)) % (Math.max(1, this.partitionToNode.length));
     }
 
+    @Override
     public Set<Node> getNodes() {
         Set<Node> s = Sets.newHashSetWithExpectedSize(partitionToNode.length);
         for(Node n: this.partitionToNode)
@@ -179,6 +184,7 @@ public class ConsistentRoutingStrategy implements RoutingStrategy {
         return tags;
     }
 
+    @Override
     public List<Integer> getPartitionList(byte[] key) {
         // hash the key and perform a modulo on the total number of partitions,
         // to get the master partition
@@ -191,6 +197,7 @@ public class ConsistentRoutingStrategy implements RoutingStrategy {
         return getReplicatingPartitionList(index);
     }
 
+    @Override
     public String getType() {
         return RoutingStrategyType.CONSISTENT_STRATEGY;
     }

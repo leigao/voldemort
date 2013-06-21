@@ -1,5 +1,5 @@
 /*
- * Copyright 2008-2009 LinkedIn, Inc
+ * Copyright 2008-2013 LinkedIn, Inc
  * 
  * Licensed under the Apache License, Version 2.0 (the "License"); you may not
  * use this file except in compliance with the License. You may obtain a copy of
@@ -48,21 +48,14 @@ public class RebalancerStateTest {
         storeToReplicaToAddPartitionList.put("test1", replicaToPartitionList);
         storeToReplicaToAddPartitionList.put("test2", replicaToPartitionList2);
 
-        HashMap<String, HashMap<Integer, List<Integer>>> storeToReplicaToDeletePartitionList = Maps.newHashMap();
-        storeToReplicaToDeletePartitionList.put("test2", replicaToPartitionList);
-
         List<RebalancePartitionsInfo> rebalancePartitionsInfos = Arrays.asList(new RebalancePartitionsInfo(2,
                                                                                                            0,
                                                                                                            storeToReplicaToAddPartitionList,
-                                                                                                           storeToReplicaToDeletePartitionList,
-                                                                                                           ServerTestUtils.getLocalCluster(1),
-                                                                                                           0),
+                                                                                                           ServerTestUtils.getLocalCluster(1)),
                                                                                new RebalancePartitionsInfo(3,
                                                                                                            1,
-                                                                                                           storeToReplicaToDeletePartitionList,
-                                                                                                           storeToReplicaToDeletePartitionList,
-                                                                                                           ServerTestUtils.getLocalCluster(2),
-                                                                                                           10));
+                                                                                                           storeToReplicaToAddPartitionList,
+                                                                                                           ServerTestUtils.getLocalCluster(2)));
 
         RebalancerState in = new RebalancerState(rebalancePartitionsInfos);
         String jsonIn = in.toJsonString();

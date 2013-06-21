@@ -673,7 +673,7 @@ public class AdminClient {
          * @param nodeId Id of the node to poll
          * @param requestId Id of the request to check
          * @param maxWait Maximum time we'll keep checking a request until we
-         *        give up
+         *        give up. Pass in 0 or less to wait "forever".
          * @param timeUnit Unit in which maxWait is expressed.
          * @param higherStatus A higher level async operation object. If this
          *        waiting is being run another async operation this helps us
@@ -688,16 +688,20 @@ public class AdminClient {
                                         TimeUnit timeUnit,
                                         AsyncOperationStatus higherStatus) {
             long delay = INITIAL_DELAY;
-            long waitUntil = System.currentTimeMillis() + timeUnit.toMillis(maxWait);
+            long waitUntil = Long.MAX_VALUE;
+            if(maxWait > 0) {
+                waitUntil = System.currentTimeMillis() + timeUnit.toMillis(maxWait);
+            }
 
             String description = null;
             String oldStatus = "";
             while(System.currentTimeMillis() < waitUntil) {
                 try {
                     AsyncOperationStatus status = getAsyncRequestStatus(nodeId, requestId);
-                    if(!status.getStatus().equalsIgnoreCase(oldStatus))
+                    if(!status.getStatus().equalsIgnoreCase(oldStatus)) {
                         logger.info("Status from node " + nodeId + " (" + status.getDescription()
                                     + ") - " + status.getStatus());
+                    }
                     oldStatus = status.getStatus();
 
                     if(higherStatus != null) {
@@ -751,6 +755,24 @@ public class AdminClient {
         }
 
         /**
+         * Wait for async task at (remote) nodeId to finish completion, using
+         * exponential backoff to poll the task completion status. Effectively
+         * waits forever.
+         * <p>
+         * 
+         * <i>Logs the status at each status check if debug is enabled.</i>
+         * 
+         * @param nodeId Id of the node to poll
+         * @param requestId Id of the request to check
+         * @return description The final description attached with the response
+         * @throws VoldemortException if task failed to finish in specified
+         *         maxWait time.
+         */
+        public String waitForCompletion(int nodeId, int requestId) {
+            return waitForCompletion(nodeId, requestId, 0, TimeUnit.SECONDS, null);
+        }
+
+        /**
          * Wait till the passed value matches with the metadata value returned
          * by the remote node for the passed key.
          * <p>
@@ -761,7 +783,7 @@ public class AdminClient {
          * @param key metadata key to keep checking for current value
          * @param value metadata value should match for exit criteria.
          * @param maxWait Maximum time we'll keep checking a request until we
-         *        give up
+         *        give up. Pass in 0 or less to wait "forever".
          * @param timeUnit Unit in which maxWait is expressed.
          */
         public void waitForCompletion(int nodeId,
@@ -770,7 +792,10 @@ public class AdminClient {
                                       long maxWait,
                                       TimeUnit timeUnit) {
             long delay = INITIAL_DELAY;
-            long waitUntil = System.currentTimeMillis() + timeUnit.toMillis(maxWait);
+            long waitUntil = Long.MAX_VALUE;
+            if(maxWait > 0) {
+                waitUntil = System.currentTimeMillis() + timeUnit.toMillis(maxWait);
+            }
 
             while(System.currentTimeMillis() < waitUntil) {
                 String currentValue = metadataMgmtOps.getRemoteMetadata(nodeId, key).getValue();
@@ -792,6 +817,21 @@ public class AdminClient {
             throw new VoldemortException("Failed to get matching value " + value + " for key "
                                          + key + " at remote node " + nodeId + " in maximum wait"
                                          + maxWait + " " + timeUnit.toString() + " time.");
+        }
+
+        /**
+         * Wait till the passed value matches with the metadata value returned
+         * by the remote node for the passed key. Effectively waits forever.
+         * <p>
+         * 
+         * <i>Logs the status at each status check if debug is enabled.</i>
+         * 
+         * @param nodeId Id of the node to poll
+         * @param key metadata key to keep checking for current value
+         * @param value metadata value should match for exit criteria.
+         */
+        public void waitForCompletion(int nodeId, String key, String value) {
+            waitForCompletion(nodeId, key, value, 0, TimeUnit.SECONDS);
         }
 
     }
@@ -853,6 +893,7 @@ public class AdminClient {
          * @param key Metadata key to update
          * @param value Value for the metadata key
          */
+
         public void updateRemoteMetadata(int remoteNodeId, String key, Versioned<String> value) {
             ByteArray keyBytes = new ByteArray(ByteUtils.getBytes(key, "UTF-8"));
             Versioned<byte[]> valueBytes = new Versioned<byte[]>(ByteUtils.getBytes(value.getValue(),
@@ -2357,24 +2398,35 @@ public class AdminClient {
          * partition plans on the basis of stealer nodes and sends them over.
          * 
          * The various combinations and their order of execution is given below
+         * where:
+         * <ul>
+         * <li>'cluster' means cluster state is updated
+         * <li>'rebalance' means rebalance flag is set.
+         * <li>'swap' means stores are swapped.
+         * </ul>
          * 
          * <pre>
-         * | swapRO | changeClusterMetadata | changeRebalanceState | Order |
-         * | f | t | t | cluster -> rebalance | 
-         * | f | f | t | rebalance |
-         * | t | t | f | cluster -> swap |
-         * | t | t | t | cluster -> swap -> rebalance |
+         * | swapRO | changeClusterMetadata | changeRebalanceState | Order                        |
+         * |   f    |         t             |          t           | cluster -> rebalance         | 
+         * |   f    |         f             |          t           | rebalance                    |
+         * |   t    |         t             |          f           | cluster -> swap              |
+         * |   t    |         t             |          t           | cluster -> swap -> rebalance |
          * </pre>
          * 
          * 
-         * Similarly for rollback:
+         * Similarly for rollback, order means the following:
+         * <ul>
+         * <li>'remove from rebalance' means set rebalance flag false
+         * <li>'cluster' means cluster is rolled back
+         * <li>'swap' means stores are swapped
+         * </ul>
          * 
          * <pre>
-         * | swapRO | changeClusterMetadata | changeRebalanceState | Order |
-         * | f | t | t | remove from rebalance -> cluster  | 
-         * | f | f | t | remove from rebalance |
-         * | t | t | f | cluster -> swap |
-         * | t | t | t | remove from rebalance -> cluster -> swap  |
+         * | swapRO | changeClusterMetadata | changeRebalanceState | Order                                    |
+         * |   f    |         t             |          t           | remove from rebalance -> cluster         | 
+         * |   f    |         f             |          t           | remove from rebalance                    |
+         * |   t    |         t             |          f           | cluster -> swap                          |
+         * |   t    |         t             |          t           | remove from rebalance -> cluster -> swap |
          * </pre>
          * 
          * 
@@ -2392,6 +2444,8 @@ public class AdminClient {
          */
         public void rebalanceStateChange(Cluster existingCluster,
                                          Cluster transitionCluster,
+                                         List<StoreDefinition> existingStoreDefs,
+                                         List<StoreDefinition> targetStoreDefs,
                                          List<RebalancePartitionsInfo> rebalancePartitionPlanList,
                                          boolean swapRO,
                                          boolean changeClusterMetadata,
@@ -2402,29 +2456,26 @@ public class AdminClient {
                                                                                                                          true);
             Set<Integer> completedNodeIds = Sets.newHashSet();
 
-            int nodeId = 0;
             HashMap<Integer, Exception> exceptions = Maps.newHashMap();
 
             try {
-                while(nodeId < transitionCluster.getNumberOfNodes()) {
-
+                for(Node node: transitionCluster.getNodes()) {
                     try {
-                        individualStateChange(nodeId,
+                        individualStateChange(node.getId(),
                                               transitionCluster,
-                                              stealerNodeToPlan.get(nodeId),
+                                              targetStoreDefs,
+                                              stealerNodeToPlan.get(node.getId()),
                                               swapRO,
                                               changeClusterMetadata,
                                               changeRebalanceState,
                                               false);
-                        completedNodeIds.add(nodeId);
+                        completedNodeIds.add(node.getId());
                     } catch(Exception e) {
-                        exceptions.put(nodeId, e);
+                        exceptions.put(node.getId(), e);
                         if(failEarly) {
                             throw e;
                         }
                     }
-                    nodeId++;
-
                 }
 
                 if(exceptions.size() > 0) {
@@ -2455,6 +2506,7 @@ public class AdminClient {
                         try {
                             individualStateChange(completedNodeId,
                                                   existingCluster,
+                                                  existingStoreDefs,
                                                   stealerNodeToPlan.get(completedNodeId),
                                                   swapRO,
                                                   changeClusterMetadata,
@@ -2494,6 +2546,7 @@ public class AdminClient {
          */
         private void individualStateChange(int nodeId,
                                            Cluster cluster,
+                                           List<StoreDefinition> storeDefs,
                                            List<RebalancePartitionsInfo> rebalancePartitionPlanList,
                                            boolean swapRO,
                                            boolean changeClusterMetadata,
@@ -2532,6 +2585,7 @@ public class AdminClient {
                                                                                                                           .setChangeRebalanceState(changeRebalanceState)
                                                                                                                           .setClusterString(clusterMapper.writeCluster(cluster))
                                                                                                                           .setRollback(rollback)
+                                                                                                                          .setStoresString(new StoreDefinitionsMapper().writeStoreList(storeDefs))
                                                                                                                           .build();
             VAdminProto.VoldemortAdminRequest adminRequest = VAdminProto.VoldemortAdminRequest.newBuilder()
                                                                                               .setRebalanceStateChange(getRebalanceStateChangeRequest)

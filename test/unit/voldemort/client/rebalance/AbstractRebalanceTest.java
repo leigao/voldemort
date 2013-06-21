@@ -37,6 +37,7 @@ import voldemort.cluster.Cluster;
 import voldemort.cluster.Node;
 import voldemort.routing.RoutingStrategy;
 import voldemort.routing.RoutingStrategyFactory;
+import voldemort.routing.StoreRoutingPlan;
 import voldemort.server.VoldemortConfig;
 import voldemort.server.VoldemortServer;
 import voldemort.store.Store;
@@ -49,7 +50,6 @@ import voldemort.utils.ByteArray;
 import voldemort.utils.ByteUtils;
 import voldemort.utils.Pair;
 import voldemort.utils.RebalanceUtils;
-import voldemort.utils.StoreInstance;
 import voldemort.utils.Utils;
 import voldemort.versioning.VectorClock;
 import voldemort.versioning.Versioned;
@@ -74,7 +74,7 @@ public abstract class AbstractRebalanceTest {
     // This method is susceptible to BindException issues due to TOCTOU
     // problem with getLocalCluster (which is used to construct cluster that is
     // passed in).
-    // TODO: Refactor AbstractRebalanceTest to take advantage of
+    // TODO: (refactor) AbstractRebalanceTest to take advantage of
     // ServerTestUtils.startVoldemortCluster.
     protected Cluster startServers(Cluster cluster,
                                    String storeXmlFile,
@@ -107,10 +107,6 @@ public abstract class AbstractRebalanceTest {
         return cluster;
     }
 
-    protected Cluster updateCluster(Cluster template) {
-        return template;
-    }
-
     protected Store<ByteArray, byte[], byte[]> getSocketStore(String storeName,
                                                               String host,
                                                               int port) {
@@ -134,7 +130,7 @@ public abstract class AbstractRebalanceTest {
         if(server == null) {
             throw new VoldemortException("Node id " + nodeId + " does not exist");
         } else {
-            return server.getMetadataStore().getServerState();
+            return server.getMetadataStore().getServerStateUnlocked();
         }
     }
 
@@ -147,9 +143,9 @@ public abstract class AbstractRebalanceTest {
         }
     }
 
-    public void checkConsistentMetadata(Cluster targetCluster, List<Integer> serverList) {
+    public void checkConsistentMetadata(Cluster finalCluster, List<Integer> serverList) {
         for(int nodeId: serverList) {
-            assertEquals(targetCluster, getCurrentCluster(nodeId));
+            assertEquals(finalCluster, getCurrentCluster(nodeId));
             assertEquals(MetadataStore.VoldemortState.NORMAL_SERVER, getCurrentState(nodeId));
         }
     }
@@ -176,22 +172,38 @@ public abstract class AbstractRebalanceTest {
         return "tcp://" + node.getHost() + ":" + node.getSocketPort();
     }
 
-    protected void rebalanceAndCheck(Cluster currentCluster,
-                                     Cluster targetCluster,
-                                     List<StoreDefinition> storeDefs,
+    /**
+     * Does the rebalance and then checks that it succeeded.
+     * 
+     * @param rebalancePlan
+     * @param rebalanceClient
+     * @param nodeCheckList
+     */
+    protected void rebalanceAndCheck(RebalancePlan rebalancePlan,
                                      RebalanceController rebalanceClient,
                                      List<Integer> nodeCheckList) {
-        rebalanceClient.rebalance(targetCluster);
-        checkEntriesPostRebalance(currentCluster,
-                                  targetCluster,
-                                  storeDefs,
+        rebalanceClient.rebalance(rebalancePlan);
+        checkEntriesPostRebalance(rebalancePlan.getCurrentCluster(),
+                                  rebalancePlan.getFinalCluster(),
+                                  rebalancePlan.getCurrentStores(),
                                   nodeCheckList,
                                   testEntries,
                                   null);
     }
 
+    /**
+     * Makes sure that all expected partition-stores are on each server after
+     * the rebalance.
+     * 
+     * @param currentCluster
+     * @param finalCluster
+     * @param storeDefs
+     * @param nodeCheckList
+     * @param baselineTuples
+     * @param baselineVersions
+     */
     protected void checkEntriesPostRebalance(Cluster currentCluster,
-                                             Cluster targetCluster,
+                                             Cluster finalCluster,
                                              List<StoreDefinition> storeDefs,
                                              List<Integer> nodeCheckList,
                                              HashMap<String, String> baselineTuples,
@@ -200,23 +212,23 @@ public abstract class AbstractRebalanceTest {
             Map<Integer, Set<Pair<Integer, Integer>>> currentNodeToPartitionTuples = RebalanceUtils.getNodeIdToAllPartitions(currentCluster,
                                                                                                                              storeDef,
                                                                                                                              true);
-            Map<Integer, Set<Pair<Integer, Integer>>> targetNodeToPartitionTuples = RebalanceUtils.getNodeIdToAllPartitions(targetCluster,
-                                                                                                                            storeDef,
-                                                                                                                            true);
+            Map<Integer, Set<Pair<Integer, Integer>>> finalNodeToPartitionTuples = RebalanceUtils.getNodeIdToAllPartitions(finalCluster,
+                                                                                                                           storeDef,
+                                                                                                                           true);
 
             for(int nodeId: nodeCheckList) {
                 Set<Pair<Integer, Integer>> currentPartitionTuples = currentNodeToPartitionTuples.get(nodeId);
-                Set<Pair<Integer, Integer>> targetPartitionTuples = targetNodeToPartitionTuples.get(nodeId);
+                Set<Pair<Integer, Integer>> finalPartitionTuples = finalNodeToPartitionTuples.get(nodeId);
 
                 HashMap<Integer, List<Integer>> flattenedPresentTuples = RebalanceUtils.flattenPartitionTuples(Utils.getAddedInTarget(currentPartitionTuples,
-                                                                                                                                      targetPartitionTuples));
+                                                                                                                                      finalPartitionTuples));
                 Store<ByteArray, byte[], byte[]> store = getSocketStore(storeDef.getName(),
-                                                                        targetCluster.getNodeById(nodeId)
-                                                                                     .getHost(),
-                                                                        targetCluster.getNodeById(nodeId)
-                                                                                     .getSocketPort());
-                checkGetEntries(targetCluster.getNodeById(nodeId),
-                                targetCluster,
+                                                                        finalCluster.getNodeById(nodeId)
+                                                                                    .getHost(),
+                                                                        finalCluster.getNodeById(nodeId)
+                                                                                    .getSocketPort());
+                checkGetEntries(finalCluster.getNodeById(nodeId),
+                                finalCluster,
                                 storeDef,
                                 store,
                                 flattenedPresentTuples,
@@ -240,9 +252,9 @@ public abstract class AbstractRebalanceTest {
 
             List<Integer> partitions = routing.getPartitionList(keyBytes.get());
 
-            if(StoreInstance.checkKeyBelongsToPartition(partitions,
-                                                        node.getPartitionIds(),
-                                                        flattenedPresentTuples)) {
+            if(StoreRoutingPlan.checkKeyBelongsToPartition(partitions,
+                                                           node.getPartitionIds(),
+                                                           flattenedPresentTuples)) {
                 List<Versioned<byte[]>> values = store.get(keyBytes, null);
 
                 // expecting exactly one version

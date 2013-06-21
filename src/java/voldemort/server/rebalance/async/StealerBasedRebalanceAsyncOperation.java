@@ -43,17 +43,23 @@ public class StealerBasedRebalanceAsyncOperation extends RebalanceAsyncOperation
     private List<Integer> rebalanceStatusList;
 
     private final RebalancePartitionsInfo stealInfo;
+    private final int partitionStoreCount;
 
     public StealerBasedRebalanceAsyncOperation(Rebalancer rebalancer,
                                                VoldemortConfig voldemortConfig,
                                                MetadataStore metadataStore,
                                                int requestId,
                                                RebalancePartitionsInfo stealInfo) {
-        super(rebalancer, voldemortConfig, metadataStore, requestId, "Stealer based rebalance : "
-                                                                     + stealInfo);
+        super(rebalancer,
+              voldemortConfig,
+              metadataStore,
+              requestId,
+              "Stealer based rebalance of " + stealInfo.getPartitionStoreCount()
+                      + " partition-stores.");
         this.rebalancer = rebalancer;
         this.stealInfo = stealInfo;
         this.rebalanceStatusList = new ArrayList<Integer>();
+        this.partitionStoreCount = stealInfo.getPartitionStoreCount();
     }
 
     @Override
@@ -72,6 +78,7 @@ public class StealerBasedRebalanceAsyncOperation extends RebalanceAsyncOperation
 
                 executors.submit(new Runnable() {
 
+                    @Override
                     public void run() {
                         try {
                             boolean isReadOnlyStore = metadataStore.getStoreDef(storeName)
@@ -118,8 +125,9 @@ public class StealerBasedRebalanceAsyncOperation extends RebalanceAsyncOperation
             if(unbalancedStores.isEmpty()) {
                 logger.info(getHeader(stealInfo) + "Rebalance of " + stealInfo
                             + " completed successfully for all " + totalStoresCount + " stores");
-                updateStatus(getHeader(stealInfo) + "Rebalance of " + stealInfo
-                             + " completed successfully for all " + totalStoresCount + " stores");
+                updateStatus(getHeader(stealInfo) + "Rebalance of " + partitionStoreCount
+                             + " partition-stores completed successfully for all "
+                             + totalStoresCount + " stores");
                 metadataStore.deleteRebalancingState(stealInfo);
             } else {
                 throw new VoldemortRebalancingException(getHeader(stealInfo)
@@ -198,23 +206,6 @@ public class StealerBasedRebalanceAsyncOperation extends RebalanceAsyncOperation
 
             logger.info(getHeader(stealInfo) + "Completed partition migration for store "
                         + storeName + " from donor node " + stealInfo.getDonorId());
-        }
-
-        // Delete partitions
-        if(stealInfo.getReplicaToDeletePartitionList(storeName) != null
-           && stealInfo.getReplicaToDeletePartitionList(storeName).size() > 0 && !isReadOnlyStore) {
-
-            logger.info(getHeader(stealInfo) + "Deleting partitions for store " + storeName
-                        + " on donor node " + stealInfo.getDonorId());
-
-            adminClient.storeMntOps.deletePartitions(stealInfo.getDonorId(),
-                                                     storeName,
-                                                     stealInfo.getReplicaToDeletePartitionList(storeName),
-                                                     stealInfo.getInitialCluster(),
-                                                     null);
-            logger.info(getHeader(stealInfo) + "Deleted partitions for store " + storeName
-                        + " on donor node " + stealInfo.getDonorId());
-
         }
 
         logger.info(getHeader(stealInfo) + "Finished all migration for store " + storeName);

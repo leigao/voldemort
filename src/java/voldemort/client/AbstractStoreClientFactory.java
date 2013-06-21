@@ -106,6 +106,7 @@ public abstract class AbstractStoreClientFactory implements StoreClientFactory {
     private final HashSet<SchedulerService> clientAsyncServiceRepo;
 
     private Cluster cluster;
+    private List<StoreDefinition> storeDefs;
 
     public AbstractStoreClientFactory(ClientConfig config) {
         this.config = config;
@@ -221,8 +222,7 @@ public abstract class AbstractStoreClientFactory implements StoreClientFactory {
             logger.debug("Obtained stores  metadata xml" + storesXml);
         }
 
-        List<StoreDefinition> storeDefs = storeMapper.readStoreList(new StringReader(storesXml),
-                                                                    false);
+        storeDefs = storeMapper.readStoreList(new StringReader(storesXml), false);
         StoreDefinition storeDef = null;
         for(StoreDefinition d: storeDefs)
             if(d.getName().equals(storeName))
@@ -297,8 +297,6 @@ public abstract class AbstractStoreClientFactory implements StoreClientFactory {
 
         store = new LoggingStore(store);
 
-        Store<K, V, T> finalStore = (Store<K, V, T>) store;
-
         if(isJmxEnabled) {
             StatTrackingStore statStore = new StatTrackingStore(store, this.stats);
             store = statStore;
@@ -316,6 +314,13 @@ public abstract class AbstractStoreClientFactory implements StoreClientFactory {
                                              getCompressionStrategy(storeDef.getValueSerializer()));
             }
         }
+
+        /*
+         * Initialize the finalstore object only once the store object itself is
+         * wrapped by a StatrackingStore seems like the finalstore object is
+         * redundant?
+         */
+        Store<K, V, T> finalStore = (Store<K, V, T>) store;
 
         if(this.config.isEnableSerializationLayer()) {
             Serializer<K> keySerializer = (Serializer<K>) serializerFactory.getSerializer(storeDef.getKeySerializer());
@@ -535,5 +540,13 @@ public abstract class AbstractStoreClientFactory implements StoreClientFactory {
 
     protected String getClientContext() {
         return clientContextName;
+    }
+
+    public Cluster getCluster() {
+        return cluster;
+    }
+
+    public List<StoreDefinition> getStoreDefs() {
+        return storeDefs;
     }
 }

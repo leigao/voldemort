@@ -90,7 +90,7 @@ public class ClusterUtils {
                                                  int nodeId) {
 
         for(int partition: preferenceList) {
-            if(getNodeByPartitionId(cluster, partition).getId() == nodeId) {
+            if(cluster.getNodeForPartitionId(partition).getId() == nodeId) {
                 return true;
             }
         }
@@ -125,22 +125,6 @@ public class ClusterUtils {
     }
 
     /**
-     * Returns the Node associated to the provided partition.
-     * 
-     * @param cluster The cluster in which to find the node
-     * @param partitionId Partition id for which we want the corresponding node
-     * @return Node that owns the partition
-     */
-    public static Node getNodeByPartitionId(Cluster cluster, int partitionId) {
-        for(Node node: cluster.getNodes()) {
-            if(node.getPartitionIds().contains(partitionId)) {
-                return node;
-            }
-        }
-        return null;
-    }
-
-    /**
      * Compress contiguous partitions into format "e-i" instead of
      * "e, f, g, h, i". This helps illustrate contiguous partitions within a
      * zone.
@@ -150,63 +134,50 @@ public class ClusterUtils {
      * @return
      */
     public static String compressedListOfPartitionsInZone(final Cluster cluster, int zoneId) {
-        Set<Integer> partitionIds = cluster.getPartitionIdsInZone(zoneId);
-        if(partitionIds.size() == 0) {
-            return "[]";
-        }
-        int curLastPartitionId = -1;
-        int curInitPartitionId = -1;
+        Map<Integer, Integer> idToRunLength = ClusterUtils.getMapOfContiguousPartitions(cluster,
+                                                                                        zoneId);
 
-        String compressedList = "[";
-        for(int partitionId: partitionIds) {
-            // Handle initial condition
-            if(curInitPartitionId == -1) {
-                curInitPartitionId = partitionId;
-                curLastPartitionId = partitionId;
-                continue;
-            }
-            // Contiguous partition Id
-            if(partitionId == curLastPartitionId + 1) {
-                curLastPartitionId = partitionId;
-                continue;
-            }
-
-            // End of (possibly) contiguous partition Ids
-            if(curInitPartitionId == curLastPartitionId) {
-                compressedList += curLastPartitionId + ", ";
+        StringBuilder sb = new StringBuilder();
+        sb.append("[");
+        boolean first = true;
+        Set<Integer> sortedInitPartitionIds = new TreeSet<Integer>(idToRunLength.keySet());
+        for(int initPartitionId: sortedInitPartitionIds) {
+            if(!first) {
+                sb.append(", ");
             } else {
-                compressedList += curInitPartitionId + "-" + curLastPartitionId + ", ";
+                first = false;
             }
-            curInitPartitionId = partitionId;
-            curLastPartitionId = partitionId;
-        }
-        // Handle end condition
-        if(curInitPartitionId == curLastPartitionId) {
-            compressedList += curLastPartitionId + "]";
-        } else {
-            compressedList += curInitPartitionId + "-" + curLastPartitionId + "]";
-        }
 
-        return compressedList;
+            int runLength = idToRunLength.get(initPartitionId);
+            if(runLength == 1) {
+                sb.append(initPartitionId);
+            } else {
+                int endPartitionId = (initPartitionId + runLength - 1)
+                                     % cluster.getNumberOfPartitions();
+                sb.append(initPartitionId).append("-").append(endPartitionId);
+            }
+        }
+        sb.append("]");
+
+        return sb.toString();
     }
 
     /**
-     * Determines a histogram of contiguous runs of partitions within a zone.
-     * I.e., for each run length of contiguous partitions, how many such runs
-     * are there.
+     * Determines run length for each 'initial' partition ID. Note that a
+     * contiguous run may "wrap around" the end of the ring.
      * 
      * @param cluster
      * @param zoneId
-     * @return map of length of contiguous run of partitions to count of number
-     *         of such runs.
+     * @return map of initial partition Id to length of contiguous run of
+     *         partition IDs within the same zone..
      */
-    public static Map<Integer, Integer> getMapOfContiguousPartitionRunLengths(final Cluster cluster,
-                                                                              int zoneId) {
+    public static Map<Integer, Integer> getMapOfContiguousPartitions(final Cluster cluster,
+                                                                     int zoneId) {
         List<Integer> partitionIds = new ArrayList<Integer>(cluster.getPartitionIdsInZone(zoneId));
-        Map<Integer, Integer> runLengthToCount = Maps.newHashMap();
+        Map<Integer, Integer> partitionIdToRunLength = Maps.newHashMap();
 
         if(partitionIds.isEmpty()) {
-            return runLengthToCount;
+            return partitionIdToRunLength;
         }
 
         int lastPartitionId = partitionIds.get(0);
@@ -219,20 +190,55 @@ public class ClusterUtils {
                 continue;
             }
             int runLength = lastPartitionId - initPartitionId + 1;
-            if(!runLengthToCount.containsKey(runLength)) {
-                runLengthToCount.put(runLength, 0);
-            }
-            runLengthToCount.put(runLength, runLengthToCount.get(runLength) + 1);
+
+            partitionIdToRunLength.put(initPartitionId, runLength);
 
             initPartitionId = partitionId;
             lastPartitionId = initPartitionId;
         }
 
-        int runLength = lastPartitionId - initPartitionId;
-        if(!runLengthToCount.containsKey(runLength)) {
-            runLengthToCount.put(runLength, 0);
+        int runLength = lastPartitionId - initPartitionId + 1;
+        if(lastPartitionId == cluster.getNumberOfPartitions() - 1
+           && partitionIdToRunLength.containsKey(0)) {
+            // special case of contiguity that wraps around the ring.
+            partitionIdToRunLength.put(initPartitionId, runLength + partitionIdToRunLength.get(0));
+            partitionIdToRunLength.remove(0);
+        } else {
+            partitionIdToRunLength.put(initPartitionId, runLength);
         }
-        runLengthToCount.put(runLength, runLengthToCount.get(runLength) + 1);
+
+        return partitionIdToRunLength;
+    }
+
+    /**
+     * Determines a histogram of contiguous runs of partitions within a zone.
+     * I.e., for each run length of contiguous partitions, how many such runs
+     * are there.
+     * 
+     * Does not correctly address "wrap around" of partition IDs (i.e., the fact
+     * that partition ID 0 is "next" to partition ID 'max')
+     * 
+     * @param cluster
+     * @param zoneId
+     * @return map of length of contiguous run of partitions to count of number
+     *         of such runs.
+     */
+    public static Map<Integer, Integer> getMapOfContiguousPartitionRunLengths(final Cluster cluster,
+                                                                              int zoneId) {
+        Map<Integer, Integer> idToRunLength = ClusterUtils.getMapOfContiguousPartitions(cluster,
+                                                                                        zoneId);
+        Map<Integer, Integer> runLengthToCount = Maps.newHashMap();
+
+        if(idToRunLength.isEmpty()) {
+            return runLengthToCount;
+        }
+
+        for(int runLength: idToRunLength.values()) {
+            if(!runLengthToCount.containsKey(runLength)) {
+                runLengthToCount.put(runLength, 0);
+            }
+            runLengthToCount.put(runLength, runLengthToCount.get(runLength) + 1);
+        }
 
         return runLengthToCount;
     }
@@ -275,36 +281,22 @@ public class ClusterUtils {
      */
     public static String getHotPartitionsDueToContiguity(final Cluster cluster,
                                                          int hotContiguityCutoff) {
-
         StringBuilder sb = new StringBuilder();
 
-        for(Integer zoneId: cluster.getZoneIds()) {
-            List<Integer> partitionIds = new ArrayList<Integer>(cluster.getPartitionIdsInZone(zoneId));
-
-            int lastPartitionId = partitionIds.get(0);
-            int initPartitionId = lastPartitionId;
-
-            for(int offset = 1; offset < partitionIds.size(); offset++) {
-                int partitionId = partitionIds.get(offset);
-                if(partitionId == lastPartitionId + 1) {
-                    lastPartitionId = partitionId;
+        for(int zoneId: cluster.getZoneIds()) {
+            Map<Integer, Integer> idToRunLength = ClusterUtils.getMapOfContiguousPartitions(cluster,
+                                                                                            zoneId);
+            for(Integer initialPartitionId: idToRunLength.keySet()) {
+                int runLength = idToRunLength.get(initialPartitionId);
+                if(runLength < hotContiguityCutoff)
                     continue;
-                }
-                int runLength = lastPartitionId - initPartitionId + 1;
-                if(runLength > hotContiguityCutoff) {
-                    int hotPartitionId = lastPartitionId + 1;
-                    for(Node node: cluster.getNodes()) {
-                        if(node.getPartitionIds().contains(hotPartitionId)) {
-                            sb.append("\tNode " + node.getId() + " (" + node.getHost()
-                                      + ") has hot primary partition " + hotPartitionId
-                                      + " that follows contiguous run of length " + runLength
-                                      + "\n");
-                        }
-                    }
-                }
 
-                initPartitionId = partitionId;
-                lastPartitionId = initPartitionId;
+                int hotPartitionId = (initialPartitionId + runLength)
+                                     % cluster.getNumberOfPartitions();
+                Node hotNode = cluster.getNodeForPartitionId(hotPartitionId);
+                sb.append("\tNode " + hotNode.getId() + " (" + hotNode.getHost()
+                          + ") has hot primary partition " + hotPartitionId
+                          + " that follows contiguous run of length " + runLength + Utils.NEWLINE);
             }
         }
 
